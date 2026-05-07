@@ -200,13 +200,13 @@ export function shouldInlineViteDevRecoveryScript(): boolean {
       env?: { DEV?: boolean; PROD?: boolean };
     }
   ).env;
-  if (viteEnv?.PROD === true) return false;
-  if (viteEnv?.DEV === true) return true;
   if (
     typeof process !== "undefined" &&
     process.env?.NODE_ENV === "production"
   ) {
     return false;
   }
+  if (viteEnv?.PROD === true) return false;
+  if (viteEnv?.DEV === true) return true;
   return true;
 }
