@@ -214,15 +214,13 @@ async function createWorkspaceInteractive(
     }
 
     await scaffoldRequiredPackages(templates, targetDir);
-
+    tryGitInit(targetDir);
     s.stop("Workspace scaffolded.");
   } catch (err: any) {
     s.stop("Failed to scaffold workspace.");
     clack.cancel(err?.message ?? String(err));
     process.exit(1);
   }
-
-  tryGitInit(targetDir);
 
   // Show the user the tree we just built so the workspace/app distinction is
   // visible, not just described. First-time users routinely expect their
@@ -482,14 +480,13 @@ async function createStandaloneApp(
   try {
     await scaffoldAppTemplate(targetDir, template);
     postProcessStandalone(name, targetDir, template);
+    tryGitInit(targetDir);
     s.stop("App created!");
   } catch (err: any) {
     s.stop("Failed to create app.");
     clack.cancel(err?.message ?? String(err));
     process.exit(1);
   }
-
-  tryGitInit(targetDir);
 
   clack.outro(`Done! Next steps:\n\n  cd ${name}\n  pnpm install\n  pnpm dev`);
 }
