@@ -12,7 +12,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   AlertDialog,
@@ -56,6 +56,7 @@ import {
   useSession,
   agentNativePath,
   appApiPath,
+  useChangeVersions,
   type CollabUser,
 } from "@agent-native/core/client";
 import { getIdToken } from "@/lib/auth";
@@ -174,14 +175,24 @@ export default function SqlDashboardPage() {
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const viewedDashboardIdRef = useRef<string | null>(null);
 
+  // Refetch the dashboard whenever the `dashboards` source bumps OR any
+  // agent action runs. We depend on both because:
+  // - `dashboards` covers same-process writes from upsertDashboard
+  // - `action` covers every successful agent action and is emitted by the
+  //   agent runner unconditionally, which makes the refresh resilient even
+  //   if the dashboards-store emit is missed (different process, etc.).
+  // Folding counters into the queryKey is the framework pattern for "agent
+  // writes show up without a manual refresh"; see `use-change-version.ts`.
+  const sync = useChangeVersions(["dashboards", "action"]);
   const dashboardQuery = useQuery({
-    queryKey: ["data", "sql-dashboard", dashboardId],
+    queryKey: ["data", "sql-dashboard", dashboardId, sync],
     enabled: !!dashboardId,
     queryFn: async () => {
       if (!dashboardId) return null;
       return fetchDashboard(dashboardId);
     },
     staleTime: 2_000,
+    placeholderData: (prev) => prev,
   });
 
   // Panel edit dialog state
@@ -870,12 +881,24 @@ export default function SqlDashboardPage() {
   }
 
   if (!loaded) {
+    // Match the eventual SqlChartCard layout exactly (Card chrome + title row +
+    // chart-body skeleton) so the transition from "dashboard config loading" to
+    // "queries loading" doesn't morph the skeleton's shape — only the title
+    // text fills in. Otherwise the bare h-64 rectangles jump into Card-chromed
+    // panels and the page visibly shifts.
     return (
       <div className="space-y-4">
-        <Skeleton className="h-8 w-64" />
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Skeleton className="h-64" />
-          <Skeleton className="h-64" />
+          {[0, 1].map((i) => (
+            <Card key={i} className="flex flex-col overflow-visible">
+              <CardHeader className="pb-2 shrink-0">
+                <Skeleton className="h-4 w-32" />
+              </CardHeader>
+              <CardContent className="flex flex-1 flex-col pt-0">
+                <Skeleton className="w-full flex-1 min-h-[250px]" />
+              </CardContent>
+            </Card>
+          ))}
         </div>
       </div>
     );

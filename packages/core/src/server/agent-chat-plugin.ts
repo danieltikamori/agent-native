@@ -80,10 +80,12 @@ import {
   getThread,
   listThreads,
   searchThreads,
+  setThreadScope,
   updateThreadData,
   withThreadDataLock,
   deleteThread,
   setThreadQueuedMessages,
+  type ChatThreadScope,
 } from "../chat-threads/store.js";
 import {
   resourceList,
@@ -337,6 +339,12 @@ function createUrlTools(): Record<string, ActionEntry> {
         await writeAppState("__set_url__", {
           searchParams: params,
           mergeSearchParams: merge,
+          // Unique-per-write token. The client's URLSync hook dedups by this
+          // so a fire-and-forget DELETE that loses its race against the next
+          // polling refetch can't cause the same URL command to be applied
+          // repeatedly (which caused the editor to bounce between slides
+          // when an agent turn errored partway through).
+          _writeId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         });
         const keys = Object.keys(params);
         return `set-search-params: ${keys.length} key${keys.length === 1 ? "" : "s"}${merge ? "" : " (replace)"}`;
@@ -387,6 +395,10 @@ function createUrlTools(): Record<string, ActionEntry> {
           pathname,
           searchParams: params,
           mergeSearchParams: merge,
+          // See note in set-search-params: unique-per-write dedup token so a
+          // race between GET and consume-DELETE in URLSync can't re-apply
+          // this command.
+          _writeId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         });
         return `set-url-path: ${pathname}`;
       },
@@ -1467,6 +1479,10 @@ Resources are NOT an agent scratchpad — never create executable scripts, task 
 
 When the user says "show me", "go to", "open", etc., ALWAYS use \`navigate\` first.
 
+### First-Session Personalization
+
+On the user's first interaction, check \`readAppState("personalization")\`. If it isn't \`{ done: true }\`, greet briefly and ask two yes/no questions: (1) a theme pick that you can satisfy with \`change-appearance\` (presets: \`warm\`, \`ocean\`, \`forest\`, \`rose\`, \`slate\`, \`default\`), and (2) one short template-specific personalization question (see this template's AGENTS.md / CLAUDE.md, or fall back to a layout-density question). After they answer, apply the changes and write \`{ done: true }\` to \`application_state.personalization\`. If their first message is already on-task, answer it first and surface the theme offer in one trailing line, then mark personalization done so it never repeats.
+
 ### Extended Capabilities
 
 You also have tools for: inline embeds, chat history search, agent teams/sub-agents, recurring jobs, A2A cross-app calls, structured memory, and browser automation (\`activate-browser\` to provision a real Chrome). Call \`get-framework-context\` to read detailed instructions for any of these when needed.
@@ -1810,6 +1826,26 @@ You have a structured memory system. Your memory index (\`memory/MEMORY.md\`) is
 - Keep descriptions concise — the index is loaded every message
 - One memory per logical topic (e.g. 'coding-style', 'project-alpha')
 - Don't save temporary debugging notes or ephemeral task details
+
+### First-Session Personalization
+
+On the user's very first interaction in this app, before answering their actual request, briefly personalize the workspace.
+
+Check the application_state key \`personalization\` via \`readAppState("personalization")\`:
+- If it returns null (or has no \`done: true\`), this is the first session — run the flow below.
+- If \`done: true\` is set, skip the flow and answer normally.
+
+**The flow (keep it to one short message, then wait for their answer before continuing):**
+
+1. Greet briefly in one sentence.
+2. Ask **two** yes/no questions inline, on separate lines:
+   - A theme question: _"Want me to pick a color theme for your workspace? I have a few presets — say a name or just 'yes' for my pick."_ Available presets: \`warm\`, \`ocean\`, \`forest\`, \`rose\`, \`slate\` (call \`change-appearance\` with one of these; or \`default\` to clear). When the user says yes without a name, pick one preset that fits this template's tone.
+   - A template-specific question that the template's AGENTS.md / CLAUDE.md documents (e.g. for calendar: _"Want me to color-code meetings by attendee or by category?"_; for mail: _"Want me to surface emails that look like they need a reply at the top?"_). If the template doesn't suggest a question, ask one generic preference question (e.g. _"Do you prefer a denser layout or roomy spacing?"_).
+3. After they answer (or decline), call \`change-appearance\` if appropriate, do whatever the second answer implies (e.g. set a calendar visual preference), and then write \`application_state.personalization\` = \`{ "done": true }\` via \`writeAppState\` so this flow doesn't run again.
+
+If the user's first message is clearly already on-task (e.g. "what's on my calendar today?"), answer it first — but still surface ONE line at the end like _"By the way, want me to set a theme for your workspace? Try \`change-appearance warm\` or just ask."_ — then mark personalization done so the offer never repeats.
+
+Do NOT block on this flow. If the user ignores it, just proceed; never re-ask the personalization questions in later sessions.
 `;
 
 const PROD_FRAMEWORK_PROMPT = `## Agent-Native Framework — Production Mode
@@ -3740,7 +3776,10 @@ When the user asks for ANY of the following — add a feature, edit a component,
 
 1. Do NOT call \`connect-builder\`, \`scaffold-workspace-app\`, \`start-workspace-app-creation\`, or any other tool that creates or edits source.
 2. Do NOT write code, list files, propose patches, or describe what you would change.
-3. Reply with one short message saying chat-in-browser on localhost can't edit code (page reloads kill the session) and offer these alternatives, in this order:
+3. Reply with one short message saying chat-in-browser on localhost can't edit code (page reloads kill the session). If — and only if — the request is specifically to **add or scaffold a new workspace app**, lead with the CLI option since it runs in the same terminal the user is already using:
+   - **Agent Native CLI** — \`npx @agent-native/core add-app\` in this workspace directory (best for template apps like Mail/Calendar/Slides; the workspace gateway picks them up automatically)
+
+   Then offer these alternatives for general source-editing work, in this order:
    - **Agent Native Desktop** — https://www.agent-native.com/download (recommended; same chat, no reload risk)
    - **Claude Code** — \`claude\` in the project directory
    - **Codex** — \`codex\` in the project directory
@@ -4800,6 +4839,25 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
       // ─── Thread management endpoints ──────────────────────────────────────
       // Single handler for /threads and /threads/:id — h3's use() does prefix
       // matching so we can't reliably split them into separate handlers.
+      const parseScopeFromQuery = (
+        q: Record<string, unknown>,
+      ): ChatThreadScope | null => {
+        const type = q.scopeType ? String(q.scopeType).trim() : "";
+        const id = q.scopeId ? String(q.scopeId).trim() : "";
+        if (!type || !id) return null;
+        const label = q.scopeLabel ? String(q.scopeLabel) : undefined;
+        return label ? { type, id, label } : { type, id };
+      };
+      const parseScopeFromBody = (raw: unknown): ChatThreadScope | null => {
+        if (raw == null) return null;
+        if (typeof raw !== "object") return null;
+        const r = raw as Record<string, unknown>;
+        const type = typeof r.type === "string" ? r.type.trim() : "";
+        const id = typeof r.id === "string" ? r.id.trim() : "";
+        if (!type || !id) return null;
+        const label = typeof r.label === "string" ? r.label : undefined;
+        return label ? { type, id, label } : { type, id };
+      };
       getH3App(nitroApp).use(
         `${routePath}/threads`,
         defineEventHandler(async (event) => {
@@ -4874,6 +4932,14 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
                   body.preview ?? thread.preview,
                   newMessageCount,
                 );
+                // Scope updates piggyback on the PUT — the client uses this
+                // path for both "detach" (scope: null) and "retag" flows.
+                // Send the field as `scope: undefined` (or omit it) when
+                // you don't want to touch the existing scope.
+                if (Object.prototype.hasOwnProperty.call(body, "scope")) {
+                  const incomingScope = parseScopeFromBody(body.scope);
+                  await setThreadScope(threadId, incomingScope);
+                }
                 return { ok: true };
               });
             }
@@ -4941,12 +5007,21 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
               200,
             );
             const q = query.q ? String(query.q).trim() : "";
+            const scope = parseScopeFromQuery(query);
+            const unscopedOnly = String(query.unscoped ?? "") === "1";
             if (q) {
-              const threads = await searchThreads(owner, q, limit);
+              const threads = await searchThreads(owner, q, limit, {
+                scope: scope ?? undefined,
+              });
               return { threads };
             }
             const offset = parseInt(String(query.offset ?? "0"), 10) || 0;
-            const threads = await listThreads(owner, limit, offset);
+            const threads = await listThreads(owner, {
+              limit,
+              offset,
+              scope: scope ?? undefined,
+              unscopedOnly,
+            });
             return { threads };
           }
 
@@ -4971,6 +5046,7 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
               const thread = await createThread(owner, {
                 id: body?.id,
                 title: body?.title ?? "",
+                scope: parseScopeFromBody(body?.scope),
               });
               return thread;
             } catch (err) {
@@ -5013,6 +5089,11 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
           const owner = ownerContext.owner;
 
           // Resolve org ID: explicit callback > session.orgId from Better Auth
+          // > implicit org membership. Better Auth leaves session.orgId null
+          // until the user explicitly switches orgs, so a fresh signup with
+          // implicit membership (e.g. domain-matched org) would otherwise see
+          // no org-scoped credentials. getOrgContext() does the same DB lookup
+          // the /builder/status endpoint uses to decide "Connected".
           let resolvedOrgId: string | undefined;
           if (options?.resolveOrgId) {
             resolvedOrgId = (await options.resolveOrgId(event)) ?? undefined;
@@ -5022,6 +5103,15 @@ Non-code requests are still fine on this surface — read data, navigate the UI,
               resolvedOrgId = session?.orgId ?? undefined;
             } catch {
               // Session not available
+            }
+            if (!resolvedOrgId) {
+              try {
+                const { getOrgContext } = await import("../org/context.js");
+                const ctx = await getOrgContext(event);
+                resolvedOrgId = ctx.orgId ?? undefined;
+              } catch {
+                // org_members table may not exist yet on first boot
+              }
             }
           }
 

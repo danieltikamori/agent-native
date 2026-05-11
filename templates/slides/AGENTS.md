@@ -293,32 +293,45 @@ If the request is for a standalone visual, hero image, diagram, one-pager, poste
 | `navigate` | `--deckId <id> [--slideIndex <n>]` | Navigate to a deck/slide |
 | `navigate` | `--view list`                      | Navigate to deck list    |
 
-### Image Generation
+### Image Generation & Uploads
 
-| Action             | Args                                                                                 | Purpose                    |
-| ------------------ | ------------------------------------------------------------------------------------ | -------------------------- |
-| `generate-image`   | `--prompt "..." [--model gemini\|openai\|auto] [--count 3] [--deck-id] [--slide-id]` | Generate images            |
-| `image-search`     | `--query "..." [--count 5]`                                                          | Search Google Images       |
-| `logo-lookup`      | `--domain acme.com`                                                                  | Get company logo URL       |
-| `image-gen-status` |                                                                                      | Check configured providers |
+| Action             | Args                                                                                 | Purpose                                                     |
+| ------------------ | ------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| `generate-image`   | `--prompt "..." [--model gemini\|openai\|auto] [--count 3] [--deck-id] [--slide-id]` | Generate images                                             |
+| `image-search`     | `--query "..." [--count 5]`                                                          | Search Google Images                                        |
+| `logo-lookup`      | `--domain acme.com`                                                                  | Get company logo URL                                        |
+| `image-gen-status` |                                                                                      | Check configured providers                                  |
+| `upload-image`     | `--data <data-url>` OR `--url <remote-url>` `[--filename ...]`                       | Upload any image to the configured provider, return CDN URL |
 
 For image-generation prompts, create actual image assets with `generate-image`; do not substitute HTML/CSS placeholders, icon-only compositions, inline SVGs, or text-only mockups. Do not render visible text inside generated images unless the user explicitly asks for exact text. Style phrases like "make it look like Builder.io" are not brand-system setup requests; use a concise style interpretation and avoid browsing/searching/analyzing brand assets unless the user explicitly asks to set up, save, import, extract, or apply a design system.
 
 When `IMAGES_A2A_URL` is configured, `generate-image` delegates to the Images app over A2A before falling back to the direct Gemini/OpenAI provider path. Use this path for brand/library-based slide imagery; keep the returned `assetId`, `runId`, `previewUrl`, `downloadUrl`, and `embedPath` with the slide so follow-up feedback can call the Images agent's `refine-image` flow by asset ID. See `.agents/skills/image-generation-via-a2a/SKILL.md`.
 
+#### Chat-attached images (drag, paste, or attach into the agent composer)
+
+When the user attaches an image to the chat, the framework pre-uploads it through the configured file-upload provider (Builder.io by default — or any provider registered via `registerFileUploadProvider`, e.g. S3 / R2 / GCS) BEFORE you see the message. The hosted URL is injected into your user message as a `<chat-image-attachment url="..." name="..." />` block at the bottom. **Use that `url` directly in `<img src="...">` when embedding the image on a slide — do not re-upload, do not refuse.** You still receive the image visually for vision/analysis.
+
+If the user attaches an image and you instead see `<chat-image-attachment-upload-error>`, no file-upload provider is configured. Suggest the user configure one — call `connect-builder` for the recommended one-click Builder.io setup (free credits), or point them at `BUILDER_PRIVATE_KEY` / a custom provider registered via `registerFileUploadProvider`. Until uploads are configured you can still see the image, but you cannot embed it on a slide as a URL.
+
+#### Re-hosting other images (generated images, search results, remote URLs)
+
+When `generate-image` or `image-search` returns a transient URL you want to preserve, or when you have an image as a base64 data URL from another tool, call `upload-image` to re-host it on whatever provider is configured. Use `--url` for remote URLs (`upload-image --url "https://..."`) and `--data` for inline data URLs.
+
 ### Design Systems
 
-| Action                      | Args                                                              | Purpose                            |
-| --------------------------- | ----------------------------------------------------------------- | ---------------------------------- |
-| `create-design-system`      | `--title "X" [--description "..."] --data '<json>'`               | Create a new design system         |
-| `update-design-system`      | `--id <id> [--title "X"] [--data '<json>']`                       | Update design system tokens        |
-| `get-design-system`         | `--id <id>`                                                       | Get design system with all tokens  |
-| `list-design-systems`       | `[--compact]`                                                     | List all accessible design systems |
-| `set-default-design-system` | `--id <id>`                                                       | Set one as the default             |
-| `apply-design-system`       | `--deckId <id> --designSystemId <id>`                             | Link a design system to a deck     |
-| `analyze-brand-assets`      | `[--websiteUrl "..."] [--companyName "..."] [--brandNotes "..."]` | Gather brand data for analysis     |
+| Action                      | Args                                                                             | Purpose                                                      |
+| --------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `create-design-system`      | `--title "X" [--description "..."] --data '<json>' [--customInstructions "..."]` | Create a new design system                                   |
+| `update-design-system`      | `--id <id> [--title "X"] [--data '<json>'] [--customInstructions "..."]`         | Update design system tokens or custom instructions           |
+| `get-design-system`         | `--id <id>`                                                                      | Get design system with all tokens (incl. customInstructions) |
+| `list-design-systems`       | `[--compact]`                                                                    | List all accessible design systems                           |
+| `set-default-design-system` | `--id <id>`                                                                      | Set one as the default                                       |
+| `apply-design-system`       | `--deckId <id> --designSystemId <id>`                                            | Link a design system to a deck                               |
+| `analyze-brand-assets`      | `[--websiteUrl "..."] [--companyName "..."] [--brandNotes "..."]`                | Gather brand data for analysis                               |
 
 When generating slides for a deck that has a design system, **always use the design system's colors, fonts, and styles** instead of the default values. Check the design system with `get-design-system --id <id>` first.
+
+If `get-design-system` returns a non-empty `customInstructions` string, treat it as user-authored guidance for this design system: follow it on every slide you generate while the deck is linked to that system, alongside the design tokens. Custom instructions override generic defaults but never override an explicit user request in the current turn.
 
 ### Import / Export
 
@@ -410,7 +423,13 @@ Per-block density limits for 16:9 slides:
 - Two- or three-column slide: each column max 4 lines, about 60 characters per line.
 - Image or `.fmd-img-placeholder`: one image up to 320px tall, or one Mermaid diagram with little or no body text alongside it.
 
-If the source material exceeds those limits, split it across additional slides instead of packing the slide tighter. The renderer auto-shrinks overfull slides as a safety net, but the result will look smaller than a purpose-fit slide.
+If the source material exceeds those limits, split it across additional slides instead of packing the slide tighter. The renderer **no longer auto-shrinks** overfull slides — vertical overflow used to be papered over with a uniform `transform: scale()` that left ugly right/bottom margins, so now the renderer keeps the slide at native size and the editor surfaces an "overflow" badge plus a "Fix with AI" button.
+
+#### Auto-fix loop on overflow
+
+`add-slide` and `update-slide` both wait briefly (3-5 s) for the editor to render and measure the slide they just wrote. If the slide overflows the canvas vertically, the action result includes a `layoutOverflow` object plus a `message` field with concrete numbers and a prioritized patch list. **When you see `layoutOverflow` in a tool result, immediately call `update-slide` on that slide to tighten it.** Prefer small surgical patches (`update-slide --find / --replace`) over a full rewrite — shorten one bullet, drop a low-value line, or shave padding. The next `update-slide` will run another fit-check, so you can keep tightening until the response no longer contains `layoutOverflow` (or the answer no longer changes — in which case split the slide across two). Pick (in order): tighten copy → reduce vertical density (fewer stacked cards, smaller gaps, slightly smaller body font but no smaller than 16px) → reduce slide padding (e.g. 40px top/bottom) → split across two slides. Do **not** try to "fix" overflow by adding `transform: scale()`, `overflow: scroll`, or absolute-positioned layers — only the HTML content shape can fix it now.
+
+If `add-slide` / `update-slide` returns **without** a `layoutOverflow` field, the slide either fit or no editor was open to measure it (running headless / closed deck). Either way you should just move on.
 
 ### Outer wrapper (required for every slide)
 

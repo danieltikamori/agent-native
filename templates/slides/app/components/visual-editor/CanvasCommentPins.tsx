@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { IconMessage, IconSend, IconX } from "@tabler/icons-react";
-import { agentChat } from "@agent-native/core";
+import { sendToAgentChat } from "@agent-native/core";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -23,6 +23,77 @@ export interface CanvasPin {
   draft?: string;
   /** Submitted state — pin disappears once the agent acknowledges */
   submitted?: boolean;
+}
+
+const POPOVER_WIDTH = 288; // tailwind w-72
+const POPOVER_HEIGHT_ESTIMATE = 200;
+const POPOVER_GAP = 12;
+const VIEWPORT_MARGIN = 16;
+
+/** Right-anchored sidebar inset (e.g. the agent sidebar) so we don't slide the
+ * composer underneath it. Mirrors the logic Pinpoint's toolbar uses. */
+function getRightSidebarInset(): number {
+  if (typeof window === "undefined" || typeof document === "undefined")
+    return 0;
+  let inset = 0;
+  for (const panel of document.querySelectorAll<HTMLElement>(
+    ".agent-sidebar-panel",
+  )) {
+    const style = window.getComputedStyle(panel);
+    if (
+      style.display === "none" ||
+      style.visibility === "hidden" ||
+      panel.getAttribute("aria-hidden") === "true"
+    ) {
+      continue;
+    }
+    const r = panel.getBoundingClientRect();
+    const anchoredRight =
+      r.width > 0 &&
+      r.right >= window.innerWidth - 1 &&
+      r.left < window.innerWidth - 1;
+    if (!anchoredRight) continue;
+    inset = Math.max(inset, Math.ceil(window.innerWidth - r.left));
+  }
+  return inset;
+}
+
+/** Compute popover offset relative to the pin anchor so the composer (and its
+ * Send button) stays inside the visible viewport — even when the right side is
+ * occluded by the agent sidebar. Without this the Send button drifts off the
+ * right edge for pins dropped near the right of the slide and clicks land on
+ * nothing. */
+function computePopoverOffset(pinX: number, pinY: number) {
+  if (typeof window === "undefined") {
+    return { left: POPOVER_GAP, top: 4 };
+  }
+  const safeRight =
+    window.innerWidth - getRightSidebarInset() - VIEWPORT_MARGIN;
+  const safeBottom = window.innerHeight - VIEWPORT_MARGIN;
+
+  let left = POPOVER_GAP;
+  if (pinX + POPOVER_GAP + POPOVER_WIDTH > safeRight) {
+    left = -POPOVER_WIDTH - POPOVER_GAP;
+  }
+  // After flipping, the popover's right edge could still spill into the
+  // sidebar if the pin sits close to it. Slide further left so the whole
+  // composer (including the Send button) stays inside the safe area.
+  if (pinX + left + POPOVER_WIDTH > safeRight) {
+    left = safeRight - pinX - POPOVER_WIDTH;
+  }
+  if (pinX + left < VIEWPORT_MARGIN) {
+    left = VIEWPORT_MARGIN - pinX;
+  }
+
+  let top = 4;
+  if (pinY + top + POPOVER_HEIGHT_ESTIMATE > safeBottom) {
+    top = -POPOVER_HEIGHT_ESTIMATE - 4;
+  }
+  if (pinY + top < VIEWPORT_MARGIN) {
+    top = VIEWPORT_MARGIN - pinY;
+  }
+
+  return { left, top };
 }
 
 interface CanvasCommentPinsProps {
@@ -183,7 +254,17 @@ export function CanvasCommentPins({
     lines.push("");
     lines.push(text);
     try {
-      agentChat.submit(lines.join("\n"));
+      // Use `sendToAgentChat` (not the shared `agentChat.submit`) so the
+      // request routes correctly when slides is embedded in Builder/Frame
+      // (the Builder parent ignores `agentNative.submitChat` — the wrapped
+      // helper falls back to posting to self in that case) and so the agent
+      // sidebar is reliably opened via the `agent-panel:open` custom event
+      // even if the user has it collapsed.
+      sendToAgentChat({
+        message: lines.join("\n"),
+        submit: true,
+        openSidebar: true,
+      });
     } catch (err) {
       console.error("[CanvasCommentPins] failed to send to agent:", err);
     }
@@ -234,8 +315,13 @@ export function CanvasCommentPins({
             )}
             style={{ left, top }}
           >
-            {/* Pin marker */}
-            <Tooltip>
+            {/* Pin marker. The tooltip is suppressed while the composer is
+             * open: the textarea already shows the same draft text, and a
+             * shadcn TooltipContent (z-[250], no `pointer-events: none`) was
+             * intercepting Send-button clicks for pins near the top of the
+             * slide where Radix auto-flips the tooltip below the trigger and
+             * onto the composer. */}
+            <Tooltip open={isActive ? false : undefined}>
               <TooltipTrigger asChild>
                 <button
                   onClick={() => setActivePinId(pin.id)}
@@ -247,14 +333,22 @@ export function CanvasCommentPins({
                   <IconMessage className="w-3.5 h-3.5" />
                 </button>
               </TooltipTrigger>
-              <TooltipContent>{pin.draft || "Comment"}</TooltipContent>
+              <TooltipContent className="pointer-events-none">
+                {pin.draft || "Comment"}
+              </TooltipContent>
             </Tooltip>
 
-            {/* Inline composer */}
+            {/* Inline composer. z-[260] keeps it above the shadcn floating-UI
+             * tier (z-[250] — Tooltip, Popover, Dialog overlay, etc.) so a
+             * stray tooltip that pops over the pin can't swallow Send clicks. */}
             {isActive && !pin.submitted && (
               <div
                 data-pin-popover
-                className="absolute left-3 top-1 w-72 rounded-lg border border-border bg-popover shadow-xl p-2"
+                className="absolute z-[260] w-72 rounded-lg border border-border bg-popover shadow-xl p-2"
+                style={(() => {
+                  const off = computePopoverOffset(left, top);
+                  return { left: off.left, top: off.top };
+                })()}
               >
                 <p className="mb-2 text-xs font-semibold text-foreground">
                   Edit slide
@@ -264,6 +358,13 @@ export function CanvasCommentPins({
                   value={pin.draft || ""}
                   onChange={(e) => updatePin(pin.id, { draft: e.target.value })}
                   onKeyDown={(e) => {
+                    // Backspace / Delete must stay inside the textarea — the
+                    // global DeckEditor handler treats them as "delete current
+                    // slide" when the canvas has focus, and any focus race
+                    // (e.g. autoFocus not yet landed, popover unmount during
+                    // submit) would otherwise blow away the slide the user is
+                    // commenting on. Stop at the source.
+                    e.stopPropagation();
                     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                       e.preventDefault();
                       submitPin(pin);

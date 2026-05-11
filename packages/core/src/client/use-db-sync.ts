@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { agentNativePath } from "./api-path.js";
+import { bumpChangeVersion } from "./use-change-version.js";
 
 interface QueryClient {
   invalidateQueries(opts?: { queryKey?: string[] }): void;
@@ -91,8 +92,11 @@ async function fetchPollJson<T>(
  * SSE is the fast path; polling is the safety net.
  *
  * @param options.queryClient - The react-query QueryClient instance
- * @param options.queryKeys - Array of query key prefixes to invalidate on change.
- *   Default: ["data"]
+ * @param options.queryKeys - **Deprecated and ignored.** The hook now
+ *   invalidates every active query on any non-own change event, so templates
+ *   no longer need to enumerate their keys. Kept in the type signature for
+ *   backward compatibility — existing call sites that still pass this option
+ *   keep working but the value has no effect.
  * @param options.pollUrl - Poll endpoint URL. Default: "/_agent-native/poll"
  * @param options.sseUrl - SSE endpoint URL. Default: "/_agent-native/events".
  *   Pass false to disable SSE and use polling only.
@@ -123,7 +127,6 @@ export function useDbSync(
 ): void {
   const {
     queryClient,
-    queryKeys = ["data"],
     pollUrl = agentNativePath(options.eventsUrl ?? "/_agent-native/poll"),
     sseUrl = resolveSseUrl(options.sseUrl),
     interval = 2000,
@@ -136,9 +139,6 @@ export function useDbSync(
 
   const onEventRef = useRef(options.onEvent);
   onEventRef.current = options.onEvent;
-
-  const keysRef = useRef(queryKeys);
-  keysRef.current = queryKeys;
 
   const ignoreSourceRef = useRef(options.ignoreSource);
   ignoreSourceRef.current = options.ignoreSource;
@@ -170,15 +170,23 @@ export function useDbSync(
         ? events.filter((e) => e.requestSource !== ignore)
         : events;
 
-      if (relevant.length > 0 && queryClient) {
-        for (const key of keysRef.current) {
-          queryClient.invalidateQueries({ queryKey: [key] });
-        }
+      // Bump per-source change counters. Components that read these via
+      // `useChangeVersion(source)` and fold the value into a React Query
+      // queryKey get a targeted refetch — no whole-cache invalidate, no
+      // request storm. See `use-change-version.ts` for the contract.
+      for (const evt of relevant) {
+        const src = typeof evt.source === "string" ? evt.source : "";
+        const ver = typeof evt.version === "number" ? evt.version : 0;
+        if (src && ver > 0) bumpChangeVersion(src, ver);
+      }
 
-        // Framework-level invalidation: always invalidate framework query
-        // keys on any non-own change event so that mutating actions
-        // (agent or HTTP) auto-refresh the UI — regardless of how the
-        // template configured queryKeys / onEvent.
+      if (relevant.length > 0 && queryClient) {
+        // Framework-level invalidate: a small, fixed list of query-key
+        // prefixes the framework's own hooks/components use (action results,
+        // extension state, application-state, the agent's `set-url` channel,
+        // etc.). Templates' own data queries do NOT live here — they react
+        // through `useChangeVersion(source)` in their query keys instead, so
+        // a single change event doesn't fan out into "refetch everything".
         queryClient.invalidateQueries({ queryKey: ["action"] });
         queryClient.invalidateQueries({ queryKey: ["extension"] });
         queryClient.invalidateQueries({ queryKey: ["extensions"] });
@@ -193,7 +201,9 @@ export function useDbSync(
         queryClient.invalidateQueries({ queryKey: ["__set_url__"] });
       }
 
-      // Always forward all events to onEvent — templates can decide.
+      // Always forward all events to onEvent — templates can layer surgical
+      // logic on top (e.g. ignore their own writes via requestSource, or
+      // invalidate inactive queries for a specific source).
       for (const evt of events) {
         onEventRef.current?.(evt);
       }

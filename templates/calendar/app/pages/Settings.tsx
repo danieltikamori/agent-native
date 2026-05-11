@@ -22,6 +22,11 @@ import { GoogleSetupWizard } from "@/components/calendar/GoogleSetupWizard";
 import { TimezoneCombobox } from "@/components/TimezoneCombobox";
 import { useSettings, useUpdateSettings } from "@/hooks/use-settings";
 import {
+  AppearancePicker,
+  agentNativePath,
+  type AppearancePresetId,
+} from "@agent-native/core/client";
+import {
   useGoogleAuthStatus,
   useGoogleAuthUrl,
   useDisconnectGoogle,
@@ -282,17 +287,21 @@ export default function Settings() {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="booking-title">Booking Page Title</Label>
+            <Label htmlFor="booking-title">Booking page title</Label>
             <Input
               id="booking-title"
               value={bookingTitle}
               onChange={(e) => setBookingTitle(e.target.value)}
               placeholder="Book a Meeting"
             />
+            <p className="text-xs text-muted-foreground">
+              Heading shown on your default public booking page. Individual
+              booking links use their own title when set.
+            </p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="booking-desc">Booking Page Description</Label>
+            <Label htmlFor="booking-desc">Booking page description</Label>
             <Textarea
               id="booking-desc"
               value={bookingDescription}
@@ -300,11 +309,15 @@ export default function Settings() {
               placeholder="Pick a time that works for you."
               rows={2}
             />
+            <p className="text-xs text-muted-foreground">
+              Subtitle shown on your default public booking page when a booking
+              link has no description of its own.
+            </p>
           </div>
 
           <div className="space-y-2">
             <Label htmlFor="default-duration">
-              Default Event Duration (minutes)
+              Default event duration (minutes)
             </Label>
             <Input
               id="default-duration"
@@ -314,11 +327,44 @@ export default function Settings() {
               min={5}
               max={480}
             />
+            <p className="text-xs text-muted-foreground">
+              Default length for new calendar events and booking slots. Booking
+              links can override this per link.
+            </p>
           </div>
 
           <Button onClick={handleSave} disabled={updateSettings.isPending}>
             {updateSettings.isPending ? "Saving..." : "Save Settings"}
           </Button>
+        </CardContent>
+      </Card>
+
+      {/* Appearance */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Appearance</CardTitle>
+          <CardDescription>
+            Pick a color theme for your workspace. Or just ask the agent.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <AppearancePicker
+            onChange={(preset: AppearancePresetId) => {
+              // Persist server-side so the choice survives reload and syncs
+              // across devices; the local UI has already updated optimistically.
+              fetch(
+                agentNativePath("/_agent-native/actions/change-appearance"),
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  credentials: "include",
+                  body: JSON.stringify({ preset }),
+                },
+              ).catch(() => {
+                // Server write failed; the local DOM change still stands.
+              });
+            }}
+          />
         </CardContent>
       </Card>
     </div>

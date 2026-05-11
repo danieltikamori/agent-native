@@ -248,23 +248,94 @@ export interface AgentPanelCodeAccess {
 
 function useBuilderConnectUrl() {
   const [connectUrl, setConnectUrl] = useState<string | null>(null);
+  const [configured, setConfigured] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(agentNativePath("/_agent-native/builder/status"))
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!cancelled && data?.connectUrl) {
-          setConnectUrl(data.connectUrl);
-        }
-      })
-      .catch(() => {});
+    // Track previous configured state so we only fanout the
+    // `agent-engine:configured-changed` event on a real false→true
+    // transition. Without this, every `/builder/status` response with
+    // `configured: true` dispatched the event, our own `onConfigured`
+    // listener caught it (because we both fire AND listen on the same
+    // global), refresh fired again, and we'd loop forever.
+    let lastConfigured = false;
+    const refresh = () => {
+      fetch(agentNativePath("/_agent-native/builder/status"))
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled || !data) return;
+          if (data.connectUrl) setConnectUrl(data.connectUrl);
+          const nextConfigured = !!data.configured;
+          setConfigured(nextConfigured);
+          if (nextConfigured && !lastConfigured) {
+            lastConfigured = true;
+            // Tell other listeners (the agent panel's "Use Builder" CTA
+            // lives in a different React tree than the connect-flow popup
+            // poller, so a fresh status read here is the only thing that
+            // flips its UI). Dispatch only on transition so listeners
+            // that share this hook don't bounce the event back here.
+            window.dispatchEvent(
+              new CustomEvent("agent-engine:configured-changed", {
+                detail: { source: "builder-status" },
+              }),
+            );
+          } else if (!nextConfigured) {
+            lastConfigured = false;
+          }
+        })
+        .catch(() => {});
+    };
+    refresh();
+    // The "Use Builder" CTA opens Builder in a `<a target="_blank">` tab
+    // (not a popup), so the previous one-shot fetch never noticed the
+    // connect succeeded when the user came back to the original tab.
+    const onFocus = () => refresh();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const onConfigured = (e: Event) => {
+      // Ignore our own dispatch — refresh() already wrote the new state.
+      // Other dispatchers (the connect-flow popup poller, an external
+      // tab that completed connect, etc.) get the refresh they need.
+      const detail = (e as CustomEvent).detail as
+        | { source?: string }
+        | undefined;
+      if (detail?.source === "builder-status") return;
+      refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("agent-engine:configured-changed", onConfigured);
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel(`builder-connect:${window.location.host}`);
+      channel.onmessage = (e: MessageEvent) => {
+        const data = e.data as { type?: string } | undefined;
+        if (data?.type === "builder-connect-success") refresh();
+      };
+    } catch {
+      // BroadcastChannel missing — focus/visibility refresh still covers it.
+    }
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      const data = e.data as { type?: string } | undefined;
+      if (data?.type === "builder-connect-success") refresh();
+    };
+    window.addEventListener("message", onMessage);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener(
+        "agent-engine:configured-changed",
+        onConfigured,
+      );
+      window.removeEventListener("message", onMessage);
+      channel?.close();
     };
   }, []);
 
-  return connectUrl;
+  return { connectUrl, configured };
 }
 
 export interface AgentPanelProps extends Omit<
@@ -285,6 +356,14 @@ export interface AgentPanelProps extends Omit<
   devAppUrl?: string;
   /** Namespace for localStorage keys — used to isolate chat state per app in the frame. */
   storageKey?: string;
+  /**
+   * Bind the chat to a specific resource (deck, design, dashboard, ...).
+   * When set, chats started inside the panel inherit this scope, the tab
+   * bar partitions per (storageKey, scope), and the user gets a "Working
+   * on {label}" badge with a Detach escape hatch. Templates compute this
+   * from the current route — see the `Layout` files for each template.
+   */
+  scope?: import("./use-chat-threads.js").ChatThreadScope | null;
   /** Optional notice rendered below the main header while Chat mode is active. */
   chatNotice?: React.ReactNode;
   /** Capability gate for source edits, workspace files, and CLI access. */
@@ -314,7 +393,7 @@ function CodeAccessUnavailablePanel({
   secondaryCtaHref?: string;
   compact?: boolean;
 }) {
-  const builderConnectUrl = useBuilderConnectUrl();
+  const { connectUrl: builderConnectUrl } = useBuilderConnectUrl();
   const builderHref =
     secondaryCtaHref ?? builderConnectUrl ?? "https://builder.io";
 
@@ -380,6 +459,7 @@ function AgentPanelInner({
   onToggleFullscreen,
   devAppUrl,
   storageKey,
+  scope,
   chatNotice,
   codeAccess,
 }: AgentPanelProps) {
@@ -527,9 +607,10 @@ function AgentPanelInner({
   // Tab close shortcuts. Avoid Cmd+W (browser/OS) and (on Windows) Ctrl+W.
   //   Mac:           Ctrl+W → close tab,  Ctrl+Alt+W → close all
   //   Windows/Linux: Alt+W  → close tab,  Ctrl+Alt+W → close all
+  // Use e.code (physical key) — on Mac, Alt+W inserts ∑ and e.key isn't "w".
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() !== "w" || e.metaKey || e.shiftKey) return;
+      if (e.code !== "KeyW" || e.metaKey || e.shiftKey) return;
       const isCloseAll = e.ctrlKey && e.altKey;
       const isCloseOne = isMac
         ? e.ctrlKey && !e.altKey
@@ -1248,6 +1329,7 @@ function AgentPanelInner({
             execMode={execMode}
             onExecModeChange={switchExecMode}
             storageKey={storageKey}
+            scope={scope}
           />
         )}
       </div>
@@ -1515,8 +1597,15 @@ function URLSync() {
     }).catch(() => {});
   }, [location.pathname, location.search, location.hash]);
 
-  // Inbound: poll for URL-update commands from the agent. We piggyback on
-  // the same 2-second cadence useDbSync uses so there's no extra timer.
+  // Inbound: poll for URL-update commands from the agent. `useDbSync`
+  // invalidates this key on every relevant app-state event, so default
+  // `structuralSharing: true` is critical — without it, repeated reads of the
+  // same stale command (when the consume-DELETE below races against the next
+  // invalidation) churned the useEffect and re-applied the navigation in a
+  // tight loop. With structural sharing on, the previous reference is reused
+  // when the JSON is unchanged so the useEffect only fires when the command
+  // actually changes; the `lastProcessedDedupKeyRef` below covers the residual
+  // race window after the cache is cleared to `null`.
   const { data: command } = useQuery({
     queryKey: ["__set_url__"],
     queryFn: async () => {
@@ -1528,30 +1617,54 @@ function URLSync() {
         const text = await res.text();
         if (!text) return null;
         const data = JSON.parse(text);
-        return data ? { ...data, _ts: Date.now() } : null;
+        return data ?? null;
       } catch {
         return null;
       }
     },
     refetchInterval: 2_000,
-    structuralSharing: false,
     retry: false,
   });
 
+  const lastProcessedDedupKeyRef = React.useRef<string | null>(null);
+
   React.useEffect(() => {
     if (!command) return;
+    const cmd = command as {
+      pathname?: string;
+      searchParams?: Record<string, string | null>;
+      mergeSearchParams?: boolean;
+      hash?: string;
+      _writeId?: string;
+    };
+    const dedupKey =
+      cmd._writeId ??
+      JSON.stringify({
+        pathname: cmd.pathname,
+        searchParams: cmd.searchParams,
+        mergeSearchParams: cmd.mergeSearchParams,
+        hash: cmd.hash,
+      });
+    if (lastProcessedDedupKeyRef.current === dedupKey) {
+      // Same command we already handled — the DELETE below races against the
+      // next polling refetch, so when it loses the same command can show up
+      // again on the next tick. Re-fire DELETE and bail rather than navigate
+      // again.
+      fetch(agentNativePath("/_agent-native/application-state/__set_url__"), {
+        method: "DELETE",
+        headers: { "X-Agent-Native-CSRF": "1" },
+      }).catch(() => {});
+      queryClient.setQueryData(["__set_url__"], null);
+      return;
+    }
+    lastProcessedDedupKeyRef.current = dedupKey;
+
     // Delete the one-shot command before applying so duplicate events
     // don't cause repeated navigation.
     fetch(agentNativePath("/_agent-native/application-state/__set_url__"), {
       method: "DELETE",
       headers: { "X-Agent-Native-CSRF": "1" },
     }).catch(() => {});
-    const cmd = command as {
-      pathname?: string;
-      searchParams?: Record<string, string | null>;
-      mergeSearchParams?: boolean;
-      hash?: string;
-    };
     try {
       const current = new URL(window.location.href);
       const nextPath = cmd.pathname ?? current.pathname;
@@ -1692,6 +1805,13 @@ export interface AgentSidebarProps {
   defaultOpen?: boolean;
   /** Animate the mobile overlay in a sheet-style slide transition. */
   animateMobile?: boolean;
+  /**
+   * Bind chats to a resource. When set, every chat started here is
+   * scoped to `{type, id}`, the tab bar/history partition by that scope,
+   * and a "Working on {label}" badge appears with a Detach option.
+   * Templates compute this from the active route (see template layouts).
+   */
+  scope?: import("./use-chat-threads.js").ChatThreadScope | null;
 }
 
 /**
@@ -1707,6 +1827,7 @@ export function AgentSidebar({
   position = "right",
   defaultOpen = false,
   animateMobile = false,
+  scope,
 }: AgentSidebarProps) {
   const initialWidth = defaultSidebarWidth ?? sidebarWidth ?? 380;
   const [open, setOpen] = useState(() =>
@@ -2022,6 +2143,7 @@ export function AgentSidebar({
           onCollapse={() => setOpenPersisted(false)}
           isFullscreen={effectiveFullscreen}
           onToggleFullscreen={isMobile ? undefined : toggleFullscreen}
+          scope={scope}
         />
       </div>
       {showResizeHandle && isLeft && (

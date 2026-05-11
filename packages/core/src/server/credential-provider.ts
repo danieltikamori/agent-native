@@ -111,6 +111,12 @@ async function resolveScopedBuilderCredential(
   const email = getRequestUserEmail();
   if (!email) return null;
 
+  // Always trace Builder lookups — these come up in "I connected Builder but
+  // chat still says Use Builder" support requests, and without scope-by-scope
+  // visibility into where the lookup actually went, the only diagnostic move
+  // is to ask the user to redo the connect flow. Mirrors `resolveSecret`'s
+  // default-on trace gate for BUILDER_* keys.
+  let scopeAttempted = "user";
   try {
     const { readAppSecret } = await import("../secrets/storage.js");
 
@@ -121,7 +127,12 @@ async function resolveScopedBuilderCredential(
       scope: "user",
       scopeId: email,
     });
-    if (userSecret) return { value: userSecret.value, source: "user" };
+    if (userSecret) {
+      console.log(
+        `[builder-credential] key=${key} email=${email} scope=user hit=true`,
+      );
+      return { value: userSecret.value, source: "user" };
+    }
 
     // 2. Per-org shared credential: when one teammate connects Builder
     //    as an owner/admin we write the OAuth result at org scope so
@@ -130,35 +141,58 @@ async function resolveScopedBuilderCredential(
     //    silently — the caller never has to know which scope answered.
     const orgId = getRequestOrgId();
     if (orgId) {
+      scopeAttempted = "org";
       const orgSecret = await readAppSecret({
         key,
         scope: "org",
         scopeId: orgId,
       });
-      if (orgSecret) return { value: orgSecret.value, source: "org" };
+      if (orgSecret) {
+        console.log(
+          `[builder-credential] key=${key} email=${email} orgId=${orgId} scope=org hit=true`,
+        );
+        return { value: orgSecret.value, source: "org" };
+      }
 
       // Older setup flows wrote shared credentials at workspace scope.
       // Keep reading those rows so status UIs and runtime resolution agree
       // for users who connected before org-scoped Builder credentials existed.
+      scopeAttempted = "workspace";
       const workspaceSecret = await readAppSecret({
         key,
         scope: "workspace",
         scopeId: orgId,
       });
       if (workspaceSecret) {
+        console.log(
+          `[builder-credential] key=${key} email=${email} orgId=${orgId} scope=workspace hit=true`,
+        );
         return { value: workspaceSecret.value, source: "workspace" };
       }
+      console.log(
+        `[builder-credential] key=${key} email=${email} orgId=${orgId} miss tried=user,org,workspace`,
+      );
     } else {
+      scopeAttempted = "workspace-solo";
       const soloWorkspaceSecret = await readAppSecret({
         key,
         scope: "workspace",
         scopeId: `solo:${email}`,
       });
       if (soloWorkspaceSecret) {
+        console.log(
+          `[builder-credential] key=${key} email=${email} scope=workspace-solo hit=true`,
+        );
         return { value: soloWorkspaceSecret.value, source: "workspace" };
       }
+      console.log(
+        `[builder-credential] key=${key} email=${email} orgId=(none) miss tried=user,workspace-solo`,
+      );
     }
-  } catch {
+  } catch (err) {
+    console.log(
+      `[builder-credential] key=${key} email=${email} scope=${scopeAttempted} error=${(err as Error)?.message ?? err}`,
+    );
     // Secrets table not ready — treat as missing.
   }
   return null;
@@ -265,6 +299,20 @@ const BUILDER_CREDENTIAL_KEYS = [
  * `scope: "user"` (the safe default that doesn't trample the org's shared
  * connection).
  *
+ * Stale-credential cleanup: before writing the new values we (1) clear ALL
+ * five BUILDER_* keys at the target scope, so optional fields the new
+ * connection doesn't carry (e.g. user picked a Builder space that returns
+ * no orgName) don't leave the previous connection's metadata behind, and
+ * (2) when writing at org scope, also clear the writer's own user-scope
+ * BUILDER_* rows so a stale personal override from an earlier connect
+ * doesn't shadow the new org write on resolution (user scope wins org
+ * scope by design — see `resolveScopedBuilderCredential`). The org-scope
+ * row is intentionally left alone when writing at user scope: that row is
+ * shared with the rest of the org and a single user's personal override
+ * shouldn't blow it away. (Victoria's "I signed in again with my Builder
+ * space and it still says no credits" report on 2026-05-11 was exactly
+ * this stale-shadow case.)
+ *
  * Returns the actual scope/scopeId used so the caller can show "Connected
  * for Builder.io" vs "Connected (personal)" in the UI.
  */
@@ -279,12 +327,31 @@ export async function writeBuilderCredentials(
   },
   options?: { orgId?: string | null; role?: string | null },
 ): Promise<{ scope: "user" | "org"; scopeId: string }> {
-  const { writeAppSecret } = await import("../secrets/storage.js");
+  const { writeAppSecret, deleteAppSecret } =
+    await import("../secrets/storage.js");
   const target = resolveCredentialWriteScope(
     email,
     options?.orgId ?? null,
     options?.role ?? null,
   );
+
+  // Clear stale rows before writing the new connection. See the function's
+  // doc comment for the two cases this handles.
+  const cleanups: Array<Promise<unknown>> = BUILDER_CREDENTIAL_KEYS.map((key) =>
+    deleteAppSecret({
+      key,
+      scope: target.scope,
+      scopeId: target.scopeId,
+    }).catch(() => {}),
+  );
+  if (target.scope === "org") {
+    for (const key of BUILDER_CREDENTIAL_KEYS) {
+      cleanups.push(
+        deleteAppSecret({ key, scope: "user", scopeId: email }).catch(() => {}),
+      );
+    }
+  }
+  await Promise.all(cleanups);
 
   const entries: Array<{ key: string; value: string }> = [
     { key: "BUILDER_PRIVATE_KEY", value: creds.privateKey },
@@ -363,6 +430,12 @@ export async function deleteBuilderCredentials(
  * only when the deploy fallback policy allows it.
  */
 export async function resolveSecret(key: string): Promise<string | null> {
+  // Log Builder-credential lookups by default so "I connected Builder but
+  // chat says no LLM" reports can be diagnosed from server logs without
+  // re-running anything. Keep noise low by gating other keys behind a flag.
+  const traceLookup =
+    key.startsWith("BUILDER_") ||
+    /^(1|true)$/i.test(process.env.DEBUG_CREDENTIAL_RESOLVE ?? "");
   const email = getRequestUserEmail();
   if (email) {
     try {
@@ -373,7 +446,14 @@ export async function resolveSecret(key: string): Promise<string | null> {
         scope: "user",
         scopeId: email,
       });
-      if (userSecret?.value) return userSecret.value;
+      if (userSecret?.value) {
+        if (traceLookup) {
+          console.log(
+            `[resolve-secret] key=${key} email=${email} scope=user hit=true`,
+          );
+        }
+        return userSecret.value;
+      }
 
       const orgId = getRequestOrgId();
       if (orgId) {
@@ -384,7 +464,14 @@ export async function resolveSecret(key: string): Promise<string | null> {
           scope: "org",
           scopeId: orgId,
         });
-        if (orgSecret?.value) return orgSecret.value;
+        if (orgSecret?.value) {
+          if (traceLookup) {
+            console.log(
+              `[resolve-secret] key=${key} email=${email} orgId=${orgId} scope=org hit=true`,
+            );
+          }
+          return orgSecret.value;
+        }
 
         // Registered secrets historically used "workspace" scope for
         // org-shared configuration. Keep reading it so Settings status and
@@ -394,29 +481,60 @@ export async function resolveSecret(key: string): Promise<string | null> {
           scope: "workspace",
           scopeId: orgId,
         });
-        if (workspaceSecret?.value) return workspaceSecret.value;
+        if (workspaceSecret?.value) {
+          if (traceLookup) {
+            console.log(
+              `[resolve-secret] key=${key} email=${email} orgId=${orgId} scope=workspace hit=true`,
+            );
+          }
+          return workspaceSecret.value;
+        }
       } else {
         const soloWorkspaceSecret = await readAppSecret({
           key,
           scope: "workspace",
           scopeId: `solo:${email}`,
         });
-        if (soloWorkspaceSecret?.value) return soloWorkspaceSecret.value;
+        if (soloWorkspaceSecret?.value) {
+          if (traceLookup) {
+            console.log(
+              `[resolve-secret] key=${key} email=${email} scope=workspace-solo hit=true`,
+            );
+          }
+          return soloWorkspaceSecret.value;
+        }
       }
-    } catch {
+    } catch (err) {
+      if (traceLookup) {
+        console.log(
+          `[resolve-secret] key=${key} email=${email} scope=error err=${(err as Error)?.message ?? err}`,
+        );
+      }
       // Secrets table not ready — treat as missing.
     }
     // Authenticated multi-tenant context: never fall back to process.env.
     // The deploy-level value would silently impersonate the actual key
     // owner across every tenant. Local/single-tenant deployments keep the
     // original env fallback for BYO-server workflows.
-    return canUseDeployCredentialFallbackForRequest()
+    const envFallback = canUseDeployCredentialFallbackForRequest()
       ? process.env[key] || null
       : null;
+    if (traceLookup) {
+      console.log(
+        `[resolve-secret] key=${key} email=${email} orgId=${getRequestOrgId() ?? "(none)"} scope=${envFallback ? "env-fallback" : "none"} hit=${!!envFallback}`,
+      );
+    }
+    return envFallback;
   }
   // Unauthenticated / local-dev / CLI / background context: env fallback
   // is safe because there's no user to mis-identify.
-  return process.env[key] || null;
+  const value = process.env[key] || null;
+  if (traceLookup) {
+    console.log(
+      `[resolve-secret] key=${key} email=(none) scope=env-anonymous hit=${!!value}`,
+    );
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------

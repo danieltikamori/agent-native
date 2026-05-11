@@ -1,9 +1,15 @@
-import { useActionQuery } from "@agent-native/core/client";
+import {
+  useActionQuery,
+  useBuilderStatus,
+  useBuilderConnectFlow,
+} from "@agent-native/core/client";
 import { OnboardingPanel } from "@agent-native/core/client/onboarding";
 import {
+  IconCheck,
   IconCloudUpload,
   IconExternalLink,
   IconKey,
+  IconLoader2,
   IconPhoto,
 } from "@tabler/icons-react";
 import type { ReactNode } from "react";
@@ -56,24 +62,101 @@ export default function SettingsPage() {
         </div>
       </div>
 
+      <ManageCredentialsSection />
+    </div>
+  );
+}
+
+function ManageCredentialsSection() {
+  const { status } = useBuilderStatus();
+  const flow = useBuilderConnectFlow();
+  // `BUILDER_IMAGE_GENERATION_ENABLED=false` deployments reject Builder
+  // credentials in `generateWithManagedImageProvider` even when Builder is
+  // connected. Surface that here so the settings UI doesn't send users
+  // down a Connect-Builder path that can't succeed. The onboarding plugin
+  // already marks the corresponding setup step `disabled` in this case;
+  // this card mirrors the gating.
+  const { data: configData } = useActionQuery(
+    "get-image-generation-config",
+    {},
+  ) as { data?: { builderEnabled?: boolean } };
+  // While the flag query is loading, assume Builder is enabled (the
+  // production default) so the connect button doesn't briefly flash as
+  // disabled on first render.
+  const builderEnabled = configData?.builderEnabled ?? true;
+  const configured = flow.hasFetchedStatus
+    ? flow.configured
+    : !!status?.configured;
+  const orgName = flow.orgName ?? status?.orgName ?? null;
+
+  if (!builderEnabled) {
+    return (
       <div className="rounded-lg border border-border p-4">
         <h3 className="text-sm font-semibold">Manage credentials</h3>
         <p className="mt-1 text-sm text-muted-foreground">
-          Update existing API keys, swap object storage providers, or reconnect
-          Builder.io from the agent sidebar setup panel.
+          Builder-managed image generation is disabled for this deployment by
+          the <code className="text-xs">BUILDER_IMAGE_GENERATION_ENABLED</code>{" "}
+          environment variable. Add a Gemini API key from the Setup checklist
+          above; the manual fallback is the only path that will succeed until
+          the flag is re-enabled.
         </p>
-        <div className="mt-3 flex flex-wrap gap-2">
-          <Button asChild variant="outline" size="sm">
-            <a
-              href="/_agent-native/builder/connect?ref=images-settings"
-              target="_blank"
-              rel="noreferrer"
-            >
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Manage credentials</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {configured
+              ? "Builder.io is connected for managed image generation. Reconnect to switch to a different Builder account or space."
+              : "Connect Builder.io for one-click managed image generation, or add a Gemini API key as a manual fallback from the Setup checklist above."}
+          </p>
+          {configured && orgName ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Connected as{" "}
+              <span className="font-medium text-foreground">{orgName}</span>.
+            </p>
+          ) : null}
+          {flow.error ? (
+            <p className="mt-2 text-xs text-destructive">{flow.error}</p>
+          ) : null}
+        </div>
+        {configured ? (
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            <IconCheck className="h-3 w-3" />
+            Connected
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={flow.start}
+          disabled={flow.connecting}
+          className="cursor-pointer"
+        >
+          {flow.connecting ? (
+            <>
+              <IconLoader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              Waiting for Builder…
+            </>
+          ) : configured ? (
+            <>
+              Reconnect Builder.io
+              <IconExternalLink className="ml-1 h-3.5 w-3.5" />
+            </>
+          ) : (
+            <>
               Connect Builder.io
               <IconExternalLink className="ml-1 h-3.5 w-3.5" />
-            </a>
-          </Button>
-        </div>
+            </>
+          )}
+        </Button>
       </div>
     </div>
   );

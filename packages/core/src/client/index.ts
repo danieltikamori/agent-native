@@ -34,6 +34,12 @@ export {
   useFileWatcher,
   useScreenRefreshKey,
 } from "./use-db-sync.js";
+export {
+  useChangeVersion,
+  useChangeVersions,
+  getChangeVersion,
+  bumpChangeVersion,
+} from "./use-change-version.js";
 export { cn } from "./utils.js";
 export { ApiKeySettings } from "./components/ApiKeySettings.js";
 export { useSession, type AuthSession } from "./use-session.js";
@@ -106,6 +112,7 @@ export {
 } from "./guided-questions.js";
 export {
   useChatThreads,
+  type ChatThreadScope,
   type ChatThreadSummary,
   type ChatThreadData,
 } from "./use-chat-threads.js";
@@ -119,6 +126,12 @@ export {
 } from "./AgentPanel.js";
 export { AgentNativeIcon } from "./components/icons/AgentNativeIcon.js";
 export { SettingsPanel, type SettingsPanelProps } from "./settings/index.js";
+export { useBuilderStatus } from "./settings/useBuilderStatus.js";
+export {
+  useBuilderConnectFlow,
+  type BuilderConnectFlow,
+  type BuilderConnectFlowOptions,
+} from "./settings/useBuilderStatus.js";
 // Deprecated — use AgentSidebar + AgentToggleButton instead
 export {
   ProductionAgentPanel,
@@ -147,6 +160,18 @@ export {
   themeInitScript,
   type ThemePreference,
 } from "./theme.js";
+export {
+  APPEARANCE_PRESETS,
+  applyAppearance,
+  getStoredAppearance,
+  useAppearance,
+  useAppearanceSync,
+  type AppearancePresetId,
+} from "./appearance.js";
+export {
+  AppearancePicker,
+  type AppearancePickerProps,
+} from "./AppearancePicker.js";
 export { AgentTerminal, type AgentTerminalProps } from "./terminal/index.js";
 export {
   trackEvent,
@@ -225,6 +250,7 @@ export {
   useActionMutation,
   type ActionRegistry,
 } from "./use-action.js";
+export { usePinchZoom, type UsePinchZoomOptions } from "./use-pinch-zoom.js";
 export {
   ShareButton,
   ShareDialog,

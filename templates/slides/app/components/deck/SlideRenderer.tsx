@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useLayoutEffect,
+  useCallback,
   type ReactNode,
 } from "react";
 import ReactMarkdown from "react-markdown";
@@ -28,6 +29,10 @@ interface SlideRendererProps {
   designSystem?: DesignSystemData;
   /** Deck aspect ratio (defaults to 16:9 when omitted) */
   aspectRatio?: AspectRatio;
+  /** Fires when the natural slide content overflows the canvas vertically.
+   * The renderer no longer shrinks slides for vertical overflow — instead the
+   * editor surfaces this so the agent can rewrite the slide to fit. */
+  onOverflowChange?: (info: SlideOverflowInfo) => void;
 }
 
 export const layoutClasses: Record<string, string> = {
@@ -125,6 +130,10 @@ export interface SlideFitTransform {
   x: number;
   y: number;
   fitted: boolean;
+  /** Vertical overflow in CSS px (0 if content fits). Reported to the agent so it can
+   * rewrite the slide HTML to fit, instead of being papered over with a uniform
+   * shrink that leaves ugly right/bottom margins. */
+  verticalOverflow: number;
 }
 
 export function computeSlideFitTransform({
@@ -144,20 +153,26 @@ export function computeSlideFitTransform({
   minY?: number;
   minScale?: number;
 }): SlideFitTransform {
+  // Only scale for horizontal overflow. For vertical overflow we surface a
+  // `verticalOverflow` measurement so the agent can rewrite the slide HTML —
+  // uniform scale-to-fit for vertical overflow shrinks both axes and leaves
+  // unbalanced right/bottom margins (with origin top-left), which looks worse
+  // than asking the LLM to redo the layout to fit the canvas properly.
   const safeContentWidth = Math.max(1, contentWidth);
-  const safeContentHeight = Math.max(1, contentHeight);
-  const rawScale = Math.min(
-    1,
-    Math.max(1, viewportWidth) / safeContentWidth,
-    Math.max(1, viewportHeight) / safeContentHeight,
-  );
+  const rawScale = Math.min(1, Math.max(1, viewportWidth) / safeContentWidth);
   const scale = Math.max(minScale, rawScale);
+
+  const verticalOverflow = Math.max(
+    0,
+    Math.round(contentHeight - viewportHeight),
+  );
 
   return {
     scale,
     x: minX < 0 ? -minX * scale : 0,
     y: minY < 0 ? -minY * scale : 0,
     fitted: rawScale < 0.999,
+    verticalOverflow,
   };
 }
 
@@ -201,6 +216,22 @@ function measureContentBounds(target: HTMLElement): {
   minY: number;
 } {
   const targetRect = target.getBoundingClientRect();
+  // `scrollWidth` / `clientWidth` return CSS pixels; `getBoundingClientRect`
+  // returns layout pixels after every ancestor transform. In presentation
+  // mode the outer canvas is scaled UP (--slide-scale > 1, e.g. 1.74), so
+  // child rects come back inflated relative to scrollWidth. Without
+  // normalization, `Math.max(scrollWidth, maxX - minX)` reads the inflated
+  // value as content overflow, computeSlideFitTransform clamps to
+  // MIN_AUTOFIT_SCALE (0.65), and every slide visibly shrinks. The editor
+  // didn't hit this because thumbnail mode scales DOWN, so scrollWidth
+  // always wins. Normalize child rects back to CSS-px space.
+  const cssWidth = target.clientWidth || target.scrollWidth || 0;
+  const cssHeight = target.clientHeight || target.scrollHeight || 0;
+  const invScaleX =
+    targetRect.width > 0 && cssWidth > 0 ? cssWidth / targetRect.width : 1;
+  const invScaleY =
+    targetRect.height > 0 && cssHeight > 0 ? cssHeight / targetRect.height : 1;
+
   let minX = 0;
   let minY = 0;
   let maxX = target.scrollWidth;
@@ -211,10 +242,15 @@ function measureContentBounds(target: HTMLElement): {
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) continue;
 
-    minX = Math.min(minX, rect.left - targetRect.left);
-    minY = Math.min(minY, rect.top - targetRect.top);
-    maxX = Math.max(maxX, rect.right - targetRect.left);
-    maxY = Math.max(maxY, rect.bottom - targetRect.top);
+    const left = (rect.left - targetRect.left) * invScaleX;
+    const top = (rect.top - targetRect.top) * invScaleY;
+    const right = (rect.right - targetRect.left) * invScaleX;
+    const bottom = (rect.bottom - targetRect.top) * invScaleY;
+
+    minX = Math.min(minX, left);
+    minY = Math.min(minY, top);
+    maxX = Math.max(maxX, right);
+    maxY = Math.max(maxY, bottom);
   }
 
   return {
@@ -225,12 +261,28 @@ function measureContentBounds(target: HTMLElement): {
   };
 }
 
+/** Reported by useSlideAutofit when content overflows the slide canvas vertically.
+ * Surfaced so the editor can prompt the agent to rewrite the slide instead of
+ * the renderer trying to paper over it with a uniform shrink. */
+export interface SlideOverflowInfo {
+  /** Vertical overflow in CSS px at native resolution (0 = fits). */
+  verticalOverflow: number;
+  /** Total natural content height in CSS px. */
+  contentHeight: number;
+  /** Available canvas height inside the slide padding. */
+  viewportHeight: number;
+}
+
 function useSlideAutofit(
   ref: React.RefObject<HTMLDivElement | null>,
   canvasWidth: number,
   canvasHeight: number,
   fitKey: string,
+  onOverflowChange?: (info: SlideOverflowInfo) => void,
 ) {
+  const overflowCallbackRef = useRef(onOverflowChange);
+  overflowCallbackRef.current = onOverflowChange;
+
   useIsomorphicLayoutEffect(() => {
     const root = ref.current;
     if (!root || typeof ResizeObserver === "undefined") return;
@@ -255,6 +307,9 @@ function useSlideAutofit(
           ? rawTargets
           : [root].filter((target) => target.scrollHeight > 0);
 
+      let worstOverflow = 0;
+      let worstInfo: SlideOverflowInfo | null = null;
+
       for (const target of targets) {
         if (isEditing) {
           resetTarget(target);
@@ -277,6 +332,33 @@ function useSlideAutofit(
         if (transform.fitted) {
           target.setAttribute("data-fmd-autofit-active", "true");
         }
+
+        if (transform.verticalOverflow > worstOverflow) {
+          worstOverflow = transform.verticalOverflow;
+          worstInfo = {
+            verticalOverflow: transform.verticalOverflow,
+            contentHeight: Math.round(bounds.contentHeight),
+            viewportHeight: Math.round(viewportHeight),
+          };
+        }
+      }
+
+      // Fire the callback on EVERY measurement (not just when the overflow
+      // value changes). The editor uses this to refresh its
+      // `application_state.slide-fit-check` record with a new `measuredAt`
+      // timestamp so the add-slide / update-slide actions can confirm the
+      // slide has been re-measured AFTER their write — even when an agent
+      // patch keeps the overflow at the same value (e.g. dropped one bullet
+      // and added another). The editor dedups React state changes on its
+      // own end if needed.
+      if (!isEditing) {
+        overflowCallbackRef.current?.(
+          worstInfo ?? {
+            verticalOverflow: 0,
+            contentHeight: 0,
+            viewportHeight: 0,
+          },
+        );
       }
     };
 
@@ -318,15 +400,17 @@ function AutoFitContent({
   fitKey,
   className = "",
   children,
+  onOverflowChange,
 }: {
   canvasWidth: number;
   canvasHeight: number;
   fitKey: string;
   className?: string;
   children: ReactNode;
+  onOverflowChange?: (info: SlideOverflowInfo) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  useSlideAutofit(ref, canvasWidth, canvasHeight, fitKey);
+  useSlideAutofit(ref, canvasWidth, canvasHeight, fitKey, onOverflowChange);
 
   return (
     <div
@@ -440,10 +524,12 @@ export function SlideInner({
   slide,
   designSystem,
   aspectRatio,
+  onOverflowChange,
 }: {
   slide: Slide;
   designSystem?: DesignSystemData;
   aspectRatio?: AspectRatio;
+  onOverflowChange?: (info: SlideOverflowInfo) => void;
 }) {
   const dims = getAspectRatioDims(aspectRatio);
   const sizeStyle: React.CSSProperties = {
@@ -523,6 +609,7 @@ export function SlideInner({
           canvasHeight={dims.height}
           fitKey={left}
           className="slide-content text-white/90"
+          onOverflowChange={onOverflowChange}
         >
           <ReactMarkdown components={markdownComponents}>
             {left.trim()}
@@ -554,6 +641,7 @@ export function SlideInner({
           canvasHeight={dims.height}
           fitKey={content}
           className="h-full w-full"
+          onOverflowChange={onOverflowChange}
         >
           <BlankSlideContent content={content} />
         </AutoFitContent>
@@ -578,6 +666,7 @@ export function SlideInner({
         canvasHeight={dims.height}
         fitKey={content}
         className="slide-content text-white/90 w-full"
+        onOverflowChange={onOverflowChange}
       >
         <ReactMarkdown components={markdownComponents}>{content}</ReactMarkdown>
       </AutoFitContent>
@@ -591,6 +680,7 @@ export default function SlideRenderer({
   thumbnail = true,
   designSystem,
   aspectRatio,
+  onOverflowChange,
 }: SlideRendererProps) {
   const dims = getAspectRatioDims(aspectRatio);
 
@@ -610,6 +700,7 @@ export default function SlideRenderer({
             slide={slide}
             designSystem={designSystem}
             aspectRatio={aspectRatio}
+            onOverflowChange={onOverflowChange}
           />
         </div>
         <ScaleHelper
@@ -639,6 +730,7 @@ export default function SlideRenderer({
           slide={slide}
           designSystem={designSystem}
           aspectRatio={aspectRatio}
+          onOverflowChange={onOverflowChange}
         />
       </div>
       <ScaleHelper targetWidth={dims.width} />
@@ -656,33 +748,52 @@ function ScaleHelper({
   targetHeight?: number;
   mode?: "contain";
 }) {
+  // Stable ref callback so React doesn't churn the ResizeObserver on every
+  // render. Returns a cleanup so React 19 disconnects on unmount / identity
+  // change — the previous inline-arrow version stored cleanup on
+  // `el.__cleanup` and never invoked it, leaking an observer per render.
+  const refCallback = useCallback(
+    (el: HTMLDivElement | null) => {
+      if (!el) return;
+      const parent = el.parentElement;
+      if (!parent) return;
+
+      const updateScale = () => {
+        // Prefer offset*, fall back to getBoundingClientRect, then to
+        // viewport. If everything still reads 0, bail rather than write
+        // `--slide-scale: 0` — that would scale the slide to nothing and
+        // the bad value would stick on the parent until the next
+        // observer tick.
+        const rect = parent.getBoundingClientRect();
+        const w = parent.offsetWidth || rect.width || window.innerWidth;
+        const h = parent.offsetHeight || rect.height || window.innerHeight;
+        if (!w || !h) return;
+        if (mode === "contain" && targetHeight) {
+          const scale = Math.min(w / targetWidth, h / targetHeight);
+          parent.style.setProperty("--slide-scale", String(scale));
+        } else {
+          parent.style.setProperty("--slide-scale", String(w / targetWidth));
+        }
+      };
+
+      // Try sync (layout may already be settled) and defer one frame
+      // (in case it isn't — first paint of /present can lag the swap
+      // out of the loading fallback).
+      updateScale();
+      const raf = requestAnimationFrame(updateScale);
+
+      const observer = new ResizeObserver(updateScale);
+      observer.observe(parent);
+
+      return () => {
+        cancelAnimationFrame(raf);
+        observer.disconnect();
+      };
+    },
+    [targetWidth, targetHeight, mode],
+  );
+
   return (
-    <div
-      className="absolute inset-0 pointer-events-none"
-      ref={(el) => {
-        if (!el) return;
-        const parent = el.parentElement;
-        if (!parent) return;
-
-        const updateScale = () => {
-          const w = parent.offsetWidth;
-          const h = parent.offsetHeight;
-          if (mode === "contain" && targetHeight) {
-            // Scale to contain both dimensions (no cropping)
-            const scale = Math.min(w / targetWidth, h / targetHeight);
-            parent.style.setProperty("--slide-scale", String(scale));
-          } else {
-            // Scale to fit width
-            parent.style.setProperty("--slide-scale", String(w / targetWidth));
-          }
-        };
-        updateScale();
-
-        const observer = new ResizeObserver(updateScale);
-        observer.observe(parent);
-
-        (el as any).__cleanup = () => observer.disconnect();
-      }}
-    />
+    <div className="absolute inset-0 pointer-events-none" ref={refCallback} />
   );
 }

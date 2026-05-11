@@ -82,6 +82,7 @@ import {
   appApiPath,
   appPath,
   useActionMutation,
+  useChangeVersions,
 } from "@agent-native/core/client";
 import { ExtensionsSidebarSection } from "@agent-native/core/client/extensions";
 import { NewDashboardDialog } from "./NewDashboardDialog";
@@ -1037,25 +1038,37 @@ export function Sidebar({ mobile }: { mobile?: boolean } = {}) {
     });
   }, []);
 
+  // Fold per-source counters into sidebar list query keys so agent-driven
+  // create/rename/archive/delete shows up without a manual refresh. We
+  // depend on `action` too because the agent runner emits an `action`
+  // event for every successful tool call — even when the matching
+  // resource-table emit (`dashboards` / `analyses`) is missed (e.g. event
+  // batching). See `use-change-version.ts` in @agent-native/core.
+  const dashboardsSync = useChangeVersions(["dashboards", "action"]);
+  const analysesSync = useChangeVersions(["analyses", "action"]);
+
   const { data: sqlDashboards = [], isLoading: sqlDashboardsLoading } =
     useQuery({
-      queryKey: ["sql-dashboards-sidebar"],
+      queryKey: ["sql-dashboards-sidebar", dashboardsSync],
       queryFn: fetchSqlDashboards,
       staleTime: 30_000,
+      placeholderData: (prev) => prev,
     });
 
   const { data: archivedDashboards = [] } = useQuery({
-    queryKey: ["sql-dashboards-archived-sidebar"],
+    queryKey: ["sql-dashboards-archived-sidebar", dashboardsSync],
     queryFn: fetchArchivedSqlDashboards,
     staleTime: 30_000,
+    placeholderData: (prev) => prev,
   });
 
   const [archivedOpen, setArchivedOpen] = useState(false);
 
   const { data: analysesList = [], isLoading: analysesLoading } = useQuery({
-    queryKey: ["analyses-sidebar"],
+    queryKey: ["analyses-sidebar", analysesSync],
     queryFn: fetchSidebarAnalyses,
     staleTime: 30_000,
+    placeholderData: (prev) => prev,
   });
 
   const sortedAnalyses = useMemo(() => {

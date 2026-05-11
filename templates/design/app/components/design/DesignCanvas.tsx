@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useMemo } from "react";
 import { agentChat } from "@agent-native/core";
+import { usePinchZoom } from "@agent-native/core/client";
 import { cn } from "@/lib/utils";
 import { DeviceFrame } from "./DeviceFrame";
 import type { ElementInfo, DeviceFrameType } from "./types";
@@ -30,6 +31,36 @@ const TWEAK_BRIDGE_SCRIPT = `
       root.style.setProperty(k, vals[k]);
     });
   });
+})();
+</script>
+`;
+
+/**
+ * Pinch-zoom bridge: forwards trackpad pinch / Cmd-Ctrl+scroll wheel events
+ * from inside the iframe to the parent window. Wheel events don't naturally
+ * bubble out of an iframe, so without this the user can only pinch in the
+ * empty area around the canvas, not over the design itself.
+ */
+const ZOOM_BRIDGE_SCRIPT = `
+<script data-agent-native-zoom-bridge>
+(function() {
+  // Attach to documentElement (not window/document) so { passive: false }
+  // is honored consistently and the browser doesn't natively pinch-zoom the
+  // iframe's own document alongside the parent's zoom.
+  var target = document.documentElement || document.body || document;
+  function onWheel(e) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    try {
+      window.parent.postMessage({
+        type: 'pinch-zoom-wheel',
+        deltaY: e.deltaY,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      }, window.location.origin);
+    } catch (err) {}
+  }
+  target.addEventListener('wheel', onWheel, { passive: false, capture: true });
 })();
 </script>
 `;
@@ -204,6 +235,7 @@ const EDIT_BRIDGE_SCRIPT = `
 interface DesignCanvasProps {
   content: string;
   zoom: number;
+  onZoomChange?: (zoom: number) => void;
   deviceFrame: DeviceFrameType;
   editMode: boolean;
   onElementSelect: (info: ElementInfo) => void;
@@ -226,6 +258,7 @@ interface DesignCanvasProps {
 export function DesignCanvas({
   content,
   zoom,
+  onZoomChange,
   deviceFrame,
   editMode,
   onElementSelect,
@@ -239,12 +272,27 @@ export function DesignCanvas({
   designTitle,
 }: DesignCanvasProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+
+  usePinchZoom({
+    containerRef: scrollContainerRef,
+    zoom,
+    setZoom: onZoomChange ?? (() => {}),
+    min: 10,
+    max: 500,
+    zoomToCursor: deviceFrame === "none",
+    enabled: Boolean(onZoomChange),
+  });
 
   // Build the srcdoc. The tweak bridge ALWAYS goes in so the panel works
   // outside Edit mode. The edit bridge (click/hover overlays) is gated.
   const srcdoc = useMemo(() => {
     const bridgeToInject =
-      TWEAK_BRIDGE_SCRIPT + (editMode ? EDIT_BRIDGE_SCRIPT : "");
+      TWEAK_BRIDGE_SCRIPT +
+      ZOOM_BRIDGE_SCRIPT +
+      (editMode ? EDIT_BRIDGE_SCRIPT : "");
     if (content.includes("</body>")) {
       return content.replace("</body>", bridgeToInject + "</body>");
     }
@@ -267,10 +315,49 @@ export function DesignCanvas({
       if (e.data.type === "element-hover") {
         onElementHover(e.data.payload);
       }
+      if (e.data.type === "pinch-zoom-wheel") {
+        if (!onZoomChange) return;
+        const iframe = iframeRef.current;
+        const scroll = scrollContainerRef.current;
+        if (!iframe || !scroll) return;
+        // Mirror usePinchZoom's algorithm here. We can't reliably re-dispatch
+        // a synthetic WheelEvent to trigger the hook's listener — untrusted
+        // events are inconsistent across browsers — so just compute the
+        // next zoom directly using the same exponential factor + cursor-anchor
+        // math. Clamp range matches the usePinchZoom call above (10–500).
+        const currentZoom = zoomRef.current;
+        const clampedDelta = Math.max(-50, Math.min(50, e.data.deltaY));
+        const factor = Math.exp(-clampedDelta * 0.01);
+        const nextZoom = Math.max(10, Math.min(500, currentZoom * factor));
+        if (nextZoom === currentZoom) return;
+        if (deviceFrame === "none") {
+          // The iframe lives inside a `transform: scale(zoom/100)` wrapper, so
+          // its visual scale relative to viewport is currentZoom / 100. Convert
+          // the iframe-document point under the cursor → viewport point →
+          // scroll-content point, then preserve cursor anchoring while zooming.
+          const iframeRect = iframe.getBoundingClientRect();
+          const scrollRect = scroll.getBoundingClientRect();
+          const scale = currentZoom / 100;
+          const viewportX = iframeRect.left + e.data.clientX * scale;
+          const viewportY = iframeRect.top + e.data.clientY * scale;
+          const cx = viewportX - scrollRect.left + scroll.scrollLeft;
+          const cy = viewportY - scrollRect.top + scroll.scrollTop;
+          const ratio = nextZoom / currentZoom;
+          const dx = cx * (ratio - 1);
+          const dy = cy * (ratio - 1);
+          onZoomChange(nextZoom);
+          requestAnimationFrame(() => {
+            scroll.scrollLeft += dx;
+            scroll.scrollTop += dy;
+          });
+        } else {
+          onZoomChange(nextZoom);
+        }
+      }
     }
     window.addEventListener("message", handleMessage);
     return () => window.removeEventListener("message", handleMessage);
-  }, [onElementSelect, onElementHover]);
+  }, [onElementSelect, onElementHover, onZoomChange, deviceFrame]);
 
   // Send tweak values to the iframe whenever they change OR the iframe
   // (re)loads. The reload case matters: changing `content` or toggling Edit
@@ -387,7 +474,10 @@ export function DesignCanvas({
     );
 
   return (
-    <div className="relative flex-1 h-full overflow-auto">
+    <div
+      ref={scrollContainerRef}
+      className="relative flex-1 h-full overflow-auto"
+    >
       {/* Dot grid background */}
       <div
         className="absolute inset-0"
