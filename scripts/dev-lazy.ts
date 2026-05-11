@@ -195,6 +195,22 @@ function stripAnsi(value: string): string {
   return value.replace(ANSI_REGEX, "");
 }
 
+// Stable per-name prefix coloring so [tray]/[core]/[dispatch] are easy to scan
+// the same way concurrently colors prefixes in dev:all. Codes are SGR foreground
+// values; the palette skips black/white/red to avoid low contrast and "looks
+// like an error" false signals.
+const PREFIX_PALETTE = [33, 34, 35, 36, 32, 95, 94, 96, 92, 93];
+const prefixColors = new Map<string, number>();
+
+function colorPrefix(name: string): string {
+  let code = prefixColors.get(name);
+  if (code === undefined) {
+    code = PREFIX_PALETTE[prefixColors.size % PREFIX_PALETTE.length];
+    prefixColors.set(name, code);
+  }
+  return `\x1b[${code}m[${name}]\x1b[0m`;
+}
+
 function isChildDevServerUrlLine(line: string): boolean {
   return /^\s*->\s+(?:Local|Network):\s+https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d+(?:\/\S*)?\s*$/i.test(
     stripAnsi(line).replace(/\u279c/g, "->"),
@@ -484,7 +500,7 @@ function startApp(app: TemplateApp): void {
   );
 
   app.process = child;
-  const prefix = `[${app.id}]`;
+  const prefix = colorPrefix(app.id);
   const stableTimer = setTimeout(() => {
     app.restartAttempts = 0;
   }, 5_000);
@@ -727,15 +743,16 @@ function startBackgroundProcess(
     shell: process.platform === "win32",
   });
   backgroundProcesses.push(child);
+  const prefix = colorPrefix(name);
   child.stdout?.on("data", (chunk) =>
-    pipeOutput(`[${name}]`, chunk, (value) => process.stdout.write(value)),
+    pipeOutput(prefix, chunk, (value) => process.stdout.write(value)),
   );
   child.stderr?.on("data", (chunk) =>
-    pipeOutput(`[${name}]`, chunk, (value) => process.stderr.write(value)),
+    pipeOutput(prefix, chunk, (value) => process.stderr.write(value)),
   );
   child.on("exit", (code) => {
     if (shuttingDown) return;
-    process.stderr.write(`[${name}] exited with code ${code ?? 0}\n`);
+    process.stderr.write(`${prefix} exited with code ${code ?? 0}\n`);
     if (name === "tray") shutdown(0);
   });
   return child;
