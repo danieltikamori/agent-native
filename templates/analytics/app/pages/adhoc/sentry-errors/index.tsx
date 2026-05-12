@@ -348,9 +348,27 @@ export default function SentryErrorsDashboard() {
     statsPeriod: period,
   });
 
+  const rawData = issuesQuery.data as
+    | { issues?: SentryIssue[] }
+    | { error: string; message?: string }
+    | null;
+
+  // Action returns 200 with { error: "missing_api_key", message: "..." } when
+  // credentials aren't configured — treat it the same as a fetch error.
+  const dataError: string | null = useMemo(() => {
+    if (issuesQuery.error) return (issuesQuery.error as Error).message;
+    if (rawData && "error" in rawData) {
+      return (
+        (rawData as { message?: string }).message ??
+        String((rawData as { error: string }).error)
+      );
+    }
+    return null;
+  }, [issuesQuery.error, rawData]);
+
   const issues: SentryIssue[] = useMemo(
-    () => (issuesQuery.data as { issues?: SentryIssue[] })?.issues ?? [],
-    [issuesQuery.data],
+    () => (rawData && "issues" in rawData ? (rawData.issues ?? []) : []),
+    [rawData],
   );
 
   const top10 = useMemo(
@@ -384,7 +402,7 @@ export default function SentryErrorsDashboard() {
         : [];
 
   const isLoading = issuesQuery.isLoading;
-  const error = issuesQuery.error as Error | null;
+  const error = dataError;
 
   function toggleIssue(id: string) {
     setSelectedIssueId((prev) => (prev === id ? null : id));
@@ -474,7 +492,7 @@ export default function SentryErrorsDashboard() {
       {/* Main Content */}
       {error ? (
         <Card className="border-border/50">
-          <ErrorState message={error.message} />
+          <ErrorState message={error} />
         </Card>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
