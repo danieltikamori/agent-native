@@ -274,11 +274,11 @@ export async function getChannelHistory(
   }
 }
 
-async function fetchThreadReplies(
+async function fetchFullThread(
   workspace: Workspace,
   channelId: string,
   threadTs: string,
-  limit = 10,
+  limit = 20,
 ): Promise<SlackMessage[]> {
   try {
     const data = await slackApi<{ messages: SlackMessage[] }>(
@@ -287,8 +287,7 @@ async function fetchThreadReplies(
       { channel: channelId, ts: threadTs, limit: String(limit) },
       false,
     );
-    // First message is the parent — skip it, return only replies
-    return (data.messages ?? []).slice(1);
+    return data.messages ?? [];
   } catch {
     return [];
   }
@@ -300,16 +299,22 @@ async function enrichWithThreads(
 ): Promise<SlackMessage[]> {
   return Promise.all(
     messages.map(async (msg) => {
-      if (!msg.reply_count || msg.reply_count === 0) return msg;
       const channelId =
         typeof msg.channel === "string" ? msg.channel : msg.channel?.id;
       if (!channelId) return msg;
-      const replies = await fetchThreadReplies(
-        workspace,
-        channelId,
-        msg.thread_ts ?? msg.ts,
-        8,
-      );
+
+      // Determine the thread root timestamp:
+      // - If msg is a reply (thread_ts differs from ts), the root is thread_ts
+      // - If msg is a parent with replies (reply_count > 0), the root is ts
+      const isReply = msg.thread_ts && msg.thread_ts !== msg.ts;
+      const hasReplies = (msg.reply_count ?? 0) > 0;
+
+      if (!isReply && !hasReplies) return msg;
+
+      const threadRootTs = isReply ? msg.thread_ts! : msg.ts;
+      const thread = await fetchFullThread(workspace, channelId, threadRootTs);
+      // thread[0] is the parent message; the rest are replies
+      const replies = thread.slice(1);
       return { ...msg, replies };
     }),
   );

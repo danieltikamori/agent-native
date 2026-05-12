@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useActionMutation } from "@agent-native/core/client";
+import { useActionMutation, sendToAgentChat } from "@agent-native/core/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -13,6 +13,7 @@ import {
   IconX,
   IconChevronDown,
   IconChevronUp,
+  IconSparkles,
 } from "@tabler/icons-react";
 import type { SentryIssue } from "./index";
 
@@ -360,33 +361,60 @@ export function SlackMentionsPanel({ issue }: SlackMentionsPanelProps) {
                   )}
                 </div>
 
-                {/* Thread toggle */}
+                {/* Thread section */}
                 {hasThread && (
-                  <div className="ml-2 pl-4 border-l-2 border-border/40">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setExpandedThreads((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(msg.ts)) next.delete(msg.ts);
-                          else next.add(msg.ts);
-                          return next;
-                        })
-                      }
-                      className="flex items-center gap-1 text-[11px] text-primary hover:text-primary/80 py-0.5"
-                    >
-                      {isExpanded ? (
-                        <IconChevronUp className="h-3 w-3" />
-                      ) : (
-                        <IconChevronDown className="h-3 w-3" />
-                      )}
-                      {isExpanded
-                        ? "Hide thread"
-                        : `${msg.replies!.length} repl${msg.replies!.length !== 1 ? "ies" : "y"} — show investigation thread`}
-                    </button>
+                  <div className="ml-2 pl-3 border-l-2 border-border/40 space-y-1">
+                    {/* Toggle */}
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExpandedThreads((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(msg.ts)) next.delete(msg.ts);
+                            else next.add(msg.ts);
+                            return next;
+                          })
+                        }
+                        className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground py-0.5"
+                      >
+                        {isExpanded ? (
+                          <IconChevronUp className="h-3 w-3" />
+                        ) : (
+                          <IconChevronDown className="h-3 w-3" />
+                        )}
+                        {msg.replies!.length} repl
+                        {msg.replies!.length !== 1 ? "ies" : "y"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const allMsgs = [
+                            { name, text, ts: msg.ts },
+                            ...msg.replies!.map((r) => ({
+                              name: resolveUsername(r, users),
+                              text: stripSlackFormatting(r.text),
+                              ts: r.ts,
+                            })),
+                          ];
+                          const transcript = allMsgs
+                            .map((m) => `${m.name}: ${m.text}`)
+                            .join("\n");
+                          sendToAgentChat({
+                            message: `Summarize this Slack thread about a Sentry error. Extract: initial investigation findings, root cause hypotheses, any fixes attempted, and current status.\n\nThread:\n${transcript}`,
+                            submit: true,
+                          });
+                        }}
+                        className="flex items-center gap-1 text-[11px] text-primary hover:text-primary/80 py-0.5"
+                      >
+                        <IconSparkles className="h-3 w-3" />
+                        Summarize
+                      </button>
+                    </div>
 
+                    {/* Replies */}
                     {isExpanded && (
-                      <div className="space-y-1.5 pt-1 pb-1">
+                      <div className="space-y-1.5 py-1">
                         {msg.replies!.map((reply) => {
                           const rName = resolveUsername(reply, users);
                           const rText = stripSlackFormatting(reply.text);
