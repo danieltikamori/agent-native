@@ -118,7 +118,7 @@ export function SlackMentionsPanel({ issue }: SlackMentionsPanelProps) {
 
   const mutation = useActionMutation("slack-messages");
 
-  const messages = result?.messages ?? [];
+  const messages = (result?.messages ?? []).slice(0, 10);
   const users: Record<string, SlackUser> = result?.users ?? {};
   const dataError =
     result?.error ??
@@ -130,7 +130,7 @@ export function SlackMentionsPanel({ issue }: SlackMentionsPanelProps) {
     setEditingQuery(false);
     setSearched(true);
     mutation.mutate(
-      { mode: "search", query: q },
+      { mode: "search", query: q, limit: 10 },
       { onSuccess: (data) => setResult(data as SlackSearchResult) },
     );
   }

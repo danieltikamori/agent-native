@@ -153,7 +153,7 @@ export default defineAction({
 
       if (args.mode === "search") {
         if (!args.query) return { error: "query is required" };
-        const result = await searchMessages(workspace, args.query);
+        const result = await searchMessages(workspace, args.query, args.limit);
         const userIds = result.messages
           .map((message) => message.user)
           .filter((id): id is string => !!id);
