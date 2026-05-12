@@ -316,6 +316,9 @@ export async function searchMessages(
     .split(/\s+/)
     .filter((t) => t.length > 2);
 
+  console.log("[slack-search] query:", query);
+  console.log("[slack-search] terms:", terms);
+
   function fuzzyMatch(text: string, term: string): boolean {
     if (text.includes(term)) return true;
     // URLs must match exactly (trailing slash variations are already normalised)
@@ -339,7 +342,14 @@ export async function searchMessages(
     limit: "200",
   });
 
-  const channels = (channelsData.channels ?? []).slice(0, 20);
+  const allChannels = channelsData.channels ?? [];
+  console.log(
+    "[slack-search] total channels visible to bot:",
+    allChannels.length,
+    allChannels.map((c) => c.name),
+  );
+
+  const channels = allChannels.slice(0, 20);
   const oldest = String(
     Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000),
   );
@@ -354,20 +364,33 @@ export async function searchMessages(
           { channel: ch.id, limit: "200", oldest },
           false,
         );
-        for (const msg of histData.messages ?? []) {
+        const msgs = histData.messages ?? [];
+        console.log(
+          `[slack-search] #${ch.name} (${ch.id}): ${msgs.length} messages fetched`,
+        );
+        for (const msg of msgs) {
           const text = msg.text?.toLowerCase() ?? "";
-          if (terms.length === 0 || terms.some((t) => fuzzyMatch(text, t))) {
+          const matched =
+            terms.length === 0 || terms.some((t) => fuzzyMatch(text, t));
+          if (matched) {
+            console.log(
+              `[slack-search]   MATCH in #${ch.name}: "${msg.text?.slice(0, 80)}"`,
+            );
             matches.push({ ...msg, channel: ch.id } as SlackMessage & {
               channel: string;
             });
           }
         }
-      } catch {
-        // bot may not have access to this channel — skip silently
+      } catch (err) {
+        console.log(
+          `[slack-search] #${ch.name} error:`,
+          (err as Error).message,
+        );
       }
     }),
   );
 
+  console.log("[slack-search] total matches:", matches.length);
   matches.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
   const limited = matches.slice(0, count);
   return { messages: limited, total: matches.length };
