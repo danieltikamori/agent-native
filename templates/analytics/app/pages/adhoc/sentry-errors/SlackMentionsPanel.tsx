@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useState as useLocalState } from "react";
 import { useActionMutation } from "@agent-native/core/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +12,8 @@ import {
   IconExternalLink,
   IconRefresh,
   IconX,
+  IconChevronDown,
+  IconChevronUp,
 } from "@tabler/icons-react";
 import type { SentryIssue } from "./index";
 
@@ -26,6 +29,7 @@ interface SlackMessage {
   reply_count?: number;
   channel?: { id: string; name: string } | string;
   permalink?: string;
+  replies?: SlackMessage[];
 }
 
 interface SlackUser {
@@ -103,6 +107,49 @@ function buildSearchQuery(issue: SentryIssue): string {
   return parts.join(" ").replace(/['"]/g, "").trim();
 }
 
+// ---- Sub-components ---------------------------------------------------------
+
+function MessageContent({
+  name,
+  text,
+  ts,
+  channelName,
+  showLink,
+}: {
+  name: string;
+  text: string;
+  ts: string;
+  channelName?: string;
+  showLink?: boolean;
+}) {
+  return (
+    <>
+      <div className="h-6 w-6 rounded-full bg-muted/60 shrink-0 flex items-center justify-center text-[10px] font-bold text-muted-foreground uppercase mt-0.5">
+        {name[0] ?? "?"}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-baseline gap-1.5 flex-wrap">
+          <span className="text-xs font-semibold">{name}</span>
+          <span className="text-[10px] text-muted-foreground">
+            {tsToDate(ts)}
+          </span>
+          {channelName && (
+            <span className="text-[10px] text-muted-foreground">
+              #{channelName}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground mt-0.5 line-clamp-3 break-words">
+          {text}
+        </p>
+      </div>
+      {showLink && (
+        <IconExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0 opacity-0 group-hover:opacity-100 transition-opacity mt-1 ml-auto" />
+      )}
+    </>
+  );
+}
+
 // ---- Main Component ---------------------------------------------------------
 
 interface SlackMentionsPanelProps {
@@ -115,6 +162,9 @@ export function SlackMentionsPanel({ issue }: SlackMentionsPanelProps) {
   const [editingQuery, setEditingQuery] = useState(false);
   const [result, setResult] = useState<SlackSearchResult | null>(null);
   const [searched, setSearched] = useState(false);
+  const [expandedThreads, setExpandedThreads] = useLocalState<Set<string>>(
+    new Set(),
+  );
 
   const mutation = useActionMutation("slack-messages");
 
@@ -271,55 +321,100 @@ export function SlackMentionsPanel({ issue }: SlackMentionsPanelProps) {
           </div>
         </div>
       ) : (
-        <div className="space-y-1 max-h-56 overflow-y-auto">
+        <div className="space-y-2 max-h-72 overflow-y-auto">
           {messages.map((msg) => {
             const name = resolveUsername(msg, users);
             const text = stripSlackFormatting(msg.text);
             const channelName =
               typeof msg.channel === "string" ? msg.channel : msg.channel?.name;
-            const Row = msg.permalink ? "a" : "div";
-            const rowProps = msg.permalink
-              ? {
-                  href: msg.permalink,
-                  target: "_blank" as const,
-                  rel: "noopener noreferrer",
-                }
-              : {};
+            const hasThread = msg.replies && msg.replies.length > 0;
+            const isExpanded = expandedThreads.has(msg.ts);
+
             return (
-              <Row
-                key={msg.ts}
-                {...rowProps}
-                className="flex gap-2 group px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors cursor-pointer -mx-2"
-              >
-                <div className="h-6 w-6 rounded-full bg-muted/60 shrink-0 flex items-center justify-center text-[10px] font-bold text-muted-foreground uppercase mt-0.5">
-                  {name[0] ?? "?"}
+              <div key={msg.ts} className="space-y-0.5">
+                {/* Parent message */}
+                <div className="flex gap-2 group -mx-2">
+                  {msg.permalink ? (
+                    <a
+                      href={msg.permalink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex gap-2 flex-1 min-w-0 px-2 py-1.5 rounded-md hover:bg-muted/50 transition-colors"
+                    >
+                      <MessageContent
+                        name={name}
+                        text={text}
+                        ts={msg.ts}
+                        channelName={channelName}
+                        showLink
+                      />
+                    </a>
+                  ) : (
+                    <div className="flex gap-2 flex-1 min-w-0 px-2 py-1.5">
+                      <MessageContent
+                        name={name}
+                        text={text}
+                        ts={msg.ts}
+                        channelName={channelName}
+                      />
+                    </div>
+                  )}
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline gap-1.5 flex-wrap">
-                    <span className="text-xs font-semibold">{name}</span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {tsToDate(msg.ts)}
-                    </span>
-                    {channelName && (
-                      <span className="text-[10px] text-muted-foreground">
-                        #{channelName}
-                      </span>
+
+                {/* Thread toggle */}
+                {hasThread && (
+                  <div className="ml-2 pl-4 border-l-2 border-border/40">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedThreads((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(msg.ts)) next.delete(msg.ts);
+                          else next.add(msg.ts);
+                          return next;
+                        })
+                      }
+                      className="flex items-center gap-1 text-[11px] text-primary hover:text-primary/80 py-0.5"
+                    >
+                      {isExpanded ? (
+                        <IconChevronUp className="h-3 w-3" />
+                      ) : (
+                        <IconChevronDown className="h-3 w-3" />
+                      )}
+                      {isExpanded
+                        ? "Hide thread"
+                        : `${msg.replies!.length} repl${msg.replies!.length !== 1 ? "ies" : "y"} — show investigation thread`}
+                    </button>
+
+                    {isExpanded && (
+                      <div className="space-y-1.5 pt-1 pb-1">
+                        {msg.replies!.map((reply) => {
+                          const rName = resolveUsername(reply, users);
+                          const rText = stripSlackFormatting(reply.text);
+                          return (
+                            <div key={reply.ts} className="flex gap-2 text-xs">
+                              <div className="h-5 w-5 rounded-full bg-muted/60 shrink-0 flex items-center justify-center text-[9px] font-bold text-muted-foreground uppercase mt-0.5">
+                                {rName[0] ?? "?"}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <span className="font-semibold text-[11px]">
+                                  {rName}
+                                </span>
+                                <span className="text-[10px] text-muted-foreground ml-1.5">
+                                  {tsToDate(reply.ts)}
+                                </span>
+                                <p className="text-muted-foreground mt-0.5 break-words">
+                                  {rText}
+                                </p>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     )}
-                    {msg.reply_count ? (
-                      <span className="text-[10px] text-muted-foreground">
-                        {msg.reply_count} repl
-                        {msg.reply_count !== 1 ? "ies" : "y"}
-                      </span>
-                    ) : null}
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5 line-clamp-3 break-words">
-                    {text}
-                  </p>
-                </div>
-                {msg.permalink && (
-                  <IconExternalLink className="h-3.5 w-3.5 text-muted-foreground shrink-0 opacity-0 group-hover:opacity-100 transition-opacity mt-1" />
                 )}
-              </Row>
+              </div>
             );
           })}
         </div>

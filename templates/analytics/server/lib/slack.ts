@@ -104,6 +104,7 @@ export interface SlackMessage {
   icons?: { image_48?: string; image_72?: string };
   channel?: { id: string; name: string } | string;
   permalink?: string;
+  replies?: SlackMessage[];
 }
 
 export interface SlackBotInfo {
@@ -273,6 +274,47 @@ export async function getChannelHistory(
   }
 }
 
+async function fetchThreadReplies(
+  workspace: Workspace,
+  channelId: string,
+  threadTs: string,
+  limit = 10,
+): Promise<SlackMessage[]> {
+  try {
+    const data = await slackApi<{ messages: SlackMessage[] }>(
+      workspace,
+      "conversations.replies",
+      { channel: channelId, ts: threadTs, limit: String(limit) },
+      false,
+    );
+    // First message is the parent — skip it, return only replies
+    return (data.messages ?? []).slice(1);
+  } catch {
+    return [];
+  }
+}
+
+async function enrichWithThreads(
+  workspace: Workspace,
+  messages: SlackMessage[],
+): Promise<SlackMessage[]> {
+  return Promise.all(
+    messages.map(async (msg) => {
+      if (!msg.reply_count || msg.reply_count === 0) return msg;
+      const channelId =
+        typeof msg.channel === "string" ? msg.channel : msg.channel?.id;
+      if (!channelId) return msg;
+      const replies = await fetchThreadReplies(
+        workspace,
+        channelId,
+        msg.thread_ts ?? msg.ts,
+        8,
+      );
+      return { ...msg, replies };
+    }),
+  );
+}
+
 export async function searchMessages(
   workspace: Workspace,
   query: string,
@@ -301,10 +343,9 @@ export async function searchMessages(
       messages?: { matches: SlackMessage[]; total: number };
     };
     if (json.ok) {
-      return {
-        messages: json.messages?.matches || [],
-        total: json.messages?.total || 0,
-      };
+      const matches = json.messages?.matches || [];
+      const enriched = await enrichWithThreads(workspace, matches);
+      return { messages: enriched, total: json.messages?.total || 0 };
     }
     // fall through to bot-token scan on token errors
   }
@@ -414,7 +455,8 @@ export async function searchMessages(
   console.log("[slack-search] total matches:", matches.length);
   matches.sort((a, b) => parseFloat(b.ts) - parseFloat(a.ts));
   const limited = matches.slice(0, count);
-  return { messages: limited, total: matches.length };
+  const enriched = await enrichWithThreads(workspace, limited);
+  return { messages: enriched, total: matches.length };
 }
 
 export async function getUserInfo(
