@@ -319,7 +319,7 @@ export async function searchMessages(
   const channelsData = await slackApi<{
     channels: { id: string; name: string }[];
   }>(workspace, "conversations.list", {
-    types: "public_channel,private_channel",
+    types: "public_channel",
     exclude_archived: "true",
     limit: "200",
   });
