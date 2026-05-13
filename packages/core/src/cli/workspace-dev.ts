@@ -619,25 +619,23 @@ export async function runWorkspaceDev(
     const child = spawnProcess("pnpm", childArgs, {
       cwd: root,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...devWatcherEnv(
-          {
-            ...env,
-            APP_NAME: app.id,
-            AGENT_NATIVE_WORKSPACE: "1",
-            AGENT_NATIVE_WORKSPACE_APPS_JSON: workspaceAppsJson(),
-            APP_BASE_PATH: basePath,
-            VITE_AGENT_NATIVE_WORKSPACE: "1",
-            VITE_AGENT_NATIVE_WORKSPACE_APPS_JSON: workspaceAppsJson(),
-            VITE_APP_BASE_PATH: basePath,
-            VITE_WORKSPACE_OAUTH_ORIGIN: workspaceOAuthOrigin(env, gatewayUrl),
-            VITE_WORKSPACE_GATEWAY_URL: gatewayUrl,
-            PORT: String(app.port),
-            WORKSPACE_GATEWAY_URL: gatewayUrl,
-          },
-          usePollingFileWatcher,
-        ),
-      },
+      env: devWatcherEnv(
+        {
+          ...env,
+          APP_NAME: app.id,
+          AGENT_NATIVE_WORKSPACE: "1",
+          AGENT_NATIVE_WORKSPACE_APPS_JSON: workspaceAppsJson(),
+          APP_BASE_PATH: basePath,
+          VITE_AGENT_NATIVE_WORKSPACE: "1",
+          VITE_AGENT_NATIVE_WORKSPACE_APPS_JSON: workspaceAppsJson(),
+          VITE_APP_BASE_PATH: basePath,
+          VITE_WORKSPACE_OAUTH_ORIGIN: workspaceOAuthOrigin(env, gatewayUrl),
+          VITE_WORKSPACE_GATEWAY_URL: gatewayUrl,
+          PORT: String(app.port),
+          WORKSPACE_GATEWAY_URL: gatewayUrl,
+        },
+        usePollingFileWatcher,
+      ),
     });
     app.process = child;
     app.installing = shouldInstall;
