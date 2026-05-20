@@ -547,7 +547,7 @@ function pendingWorkspaceAppMatchesCurrentContext(
 ): boolean {
   if (isPendingWorkspaceAppExpired(app)) return false;
   const currentContext = pendingWorkspaceAppContext();
-  if (!app.contextId) return !currentContext;
+  if (!app.contextId) return true;
   return app.contextId === currentContext?.id;
 }
 
@@ -1101,6 +1101,7 @@ export async function updateWorkspaceAppMetadata(input: {
   name?: string | null;
   description?: string | null;
 }): Promise<WorkspaceAppSummary> {
+  await assertCanManageAppCreationSettings();
   const appId = input.appId.trim();
   assertValidWorkspaceAppId(appId);
 

@@ -11,12 +11,29 @@ const settingsKey = "dispatch-app-creation-settings:user:dev@example.test";
 
 const mocks = vi.hoisted(() => {
   const settings = new Map<string, unknown>();
+  const state = {
+    orgRole: "admin" as string | null,
+  };
   return {
     settings,
+    state,
     getSetting: vi.fn(async (key: string) => settings.get(key) ?? null),
     putSetting: vi.fn(async (key: string, value: unknown) => {
       settings.set(key, value);
     }),
+    getDbExec: vi.fn(() => ({
+      execute: vi.fn(async () => ({
+        rows: state.orgRole ? [{ role: state.orgRole }] : [],
+      })),
+    })),
+  };
+});
+
+vi.mock("@agent-native/core/db", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@agent-native/core/db")>();
+  return {
+    ...actual,
+    getDbExec: () => mocks.getDbExec(),
   };
 });
 
@@ -38,6 +55,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
   mocks.settings.clear();
+  mocks.state.orgRole = "admin";
   globalThis.fetch = originalFetch;
 });
 
@@ -169,7 +187,7 @@ describe("listWorkspaceApps", () => {
     expect(apps.map((app) => app.id)).toEqual(["portal"]);
   });
 
-  it("only shows pending Builder app rows from the current branch context", async () => {
+  it("shows current branch and legacy pending Builder app rows", async () => {
     stubManifest();
     vi.stubEnv("BRANCH", "feature-a");
     mocks.settings.set(settingsKey, {
@@ -191,7 +209,7 @@ describe("listWorkspaceApps", () => {
       () => listWorkspaceApps({ includeAgentCards: false }),
     );
 
-    expect(apps.map((app) => app.id)).toEqual(["dispatch", "mail"]);
+    expect(apps.map((app) => app.id)).toEqual(["dispatch", "legacy", "mail"]);
     expect(apps.find((app) => app.id === "mail")?.statusLabel).toBe(
       "Pending Builder branch",
     );
@@ -254,7 +272,7 @@ describe("listWorkspaceApps", () => {
     expect(apps.find((app) => app.id === "mail")?.status).toBe("ready");
   });
 
-  it("lets workspace members update app display metadata", async () => {
+  it("lets workspace admins update app display metadata", async () => {
     stubNoPendingContext();
     stubManifest([
       { id: "dispatch", name: "Dispatch", path: "/dispatch" },
@@ -287,6 +305,29 @@ describe("listWorkspaceApps", () => {
         }),
       },
     });
+    expect(mocks.getDbExec).toHaveBeenCalled();
+  });
+
+  it("blocks non-admin workspace members from updating app display metadata", async () => {
+    mocks.state.orgRole = "member";
+    stubNoPendingContext();
+    stubManifest([{ id: "todo", name: "Todo", path: "/todo" }]);
+
+    await expect(
+      runWithRequestContext(
+        { userEmail: "dev@example.test", orgId: "org-123" },
+        () =>
+          updateWorkspaceAppMetadata({
+            appId: "todo",
+            name: "Todo Board",
+          }),
+      ),
+    ).rejects.toThrow(
+      "Only organization owners and admins can update app creation settings.",
+    );
+    expect(
+      mocks.settings.get("workspace-app-metadata:org:org-123"),
+    ).toBeUndefined();
   });
 
   it("generates a concise seed description from an app prompt", () => {
