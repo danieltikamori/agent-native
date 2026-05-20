@@ -285,6 +285,8 @@ Use the real React app with `embedApp()` whenever the user needs UI. The mental 
 
 That means full-app embeds can do anything the route can do once opened: review or edit an email draft, show a filtered inbox/search, open a calendar event or event draft, load an extension page, inspect a full analytics dashboard or saved analysis, continue a deck in the Slides editor, or open a Design project/editor. Prefer URL/deep-link params and the existing `/_agent-native/open` navigation/app-state bridge over inventing a second state protocol for MCP Apps.
 
+On rare occasions the right target is a focused app route that renders one shared React component instead of the whole app shell. Analytics' `/chart` route is the model: it takes a compact `SqlPanel` payload in the URL and renders the same chart component the dashboard uses. This is still an app embed, not a plain HTML MCP App. Expose or call it through a normal action / `open_app({ path, embed: true })`, keep the URL deterministic, and let `embedApp()` render that route inline.
+
 Do not hand-write one-off plain HTML MCP Apps for product UI; if the action needs a custom surface, add or reuse a real app route/component first and embed that route.
 
 ```ts

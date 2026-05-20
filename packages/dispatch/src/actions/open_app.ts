@@ -15,7 +15,7 @@ const openAppSchema = z
       .string()
       .optional()
       .describe(
-        'Optional route within the target app, e.g. /dashboards/q2. Dispatch extension routes such as /extensions/<id>/<slug> belong to app "dispatch".',
+        'Optional route within the target app, e.g. /adhoc/q2 or /chart?panel=... . Dispatch extension routes such as /extensions/<id>/<slug> belong to app "dispatch".',
       ),
     params: z
       .record(z.string(), deepLinkParam)
@@ -37,7 +37,7 @@ const openAppSchema = z
 
 export default defineAction({
   description:
-    'Build a deep link or embeddable app route for an app available through Dispatch MCP. Use app "dispatch" for Dispatch extension/tool pages. No side effects; surface the returned Open link to the user.',
+    'Build a deep link or embeddable app route/component route for an app available through Dispatch MCP. Use app "dispatch" for Dispatch extension/tool pages. No side effects; surface the returned Open link to the user.',
   schema: openAppSchema,
   http: { method: "GET" },
   readOnly: true,

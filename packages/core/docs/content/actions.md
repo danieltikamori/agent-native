@@ -166,6 +166,11 @@ This works for draft emails, filtered inboxes, calendar event drafts, full
 dashboards, saved analyses, extension routes, decks, design editors, and any
 other state the app can load from a route.
 
+When a whole app surface is too much, embed a narrow route that renders a real
+shared React component instead. For example, Analytics can render `/chart` with
+a compact `SqlPanel` URL payload so the MCP host shows one live chart while the
+implementation still reuses the dashboard chart component.
+
 ```ts
 import { embedApp } from "@agent-native/core";
 

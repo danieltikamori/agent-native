@@ -216,6 +216,14 @@ Design project/editor. Prefer URL/deep-link params and the existing
 `/_agent-native/open` navigation/app-state bridge over inventing a second
 state protocol for MCP Apps.
 
+On rare occasions the right target is a focused app route that renders one
+shared React component instead of the whole app shell. Analytics' `/chart`
+route is the model: it takes a compact `SqlPanel` payload in the URL and
+renders the same chart component the dashboard uses. This is still an app
+embed, not a plain HTML MCP App. Expose or call it through a normal action /
+`open_app({ path, embed: true })`, keep the URL deterministic, and let
+`embedApp()` render that route inline.
+
 Do not hand-write one-off plain HTML MCP Apps for product UI; if the action
 needs a custom surface, add or reuse a real app route/component first and embed
 that route.
@@ -344,7 +352,8 @@ connect or present a token rather than assuming the action is missing.
 - Do add `mcpApp` when a UI-capable MCP host should render an inline review or
   edit surface, while keeping the `link` fallback.
 - Do use `embedApp()` / `open_app({ embed: true })` when the right UI is the
-  existing React app at a specific route, including full app routes.
+  existing React app at a specific route, including full app routes and focused
+  component routes like an Analytics chart embed.
 - Do build the URL with `buildDeepLink(...)` — it is the single source of truth
   for the open-route format.
 - Do keep `link` pure and synchronous; return `null` when there's nothing to
