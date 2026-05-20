@@ -79,6 +79,12 @@ enum NativeFullscreenBackend {
         recording: SCRecordingOutput,
         finish: Arc<RecordingFinish>,
     },
+    /// Stream is still running but no recording output is attached.
+    /// Entered on pause; exited on resume when a fresh output is created.
+    #[cfg(target_os = "macos")]
+    ScreenCaptureKitPaused {
+        stream: SCStream,
+    },
 }
 
 /// `SCRecordingOutput` finalizes the MP4 *asynchronously*: after
@@ -384,8 +390,12 @@ pub async fn native_fullscreen_recording_stop_and_upload(
     // When paused the recording output was already removed; only stop the stream.
     let stop_outcome = if session.is_paused {
         #[cfg(target_os = "macos")]
-        if let NativeFullscreenBackend::ScreenCaptureKit { stream, .. } = &mut session.backend {
-            let _ = stream.stop_capture();
+        match &mut session.backend {
+            NativeFullscreenBackend::ScreenCaptureKit { stream, .. }
+            | NativeFullscreenBackend::ScreenCaptureKitPaused { stream } => {
+                let _ = stream.stop_capture();
+            }
+            _ => {}
         }
         Ok(())
     } else {
@@ -472,8 +482,12 @@ pub async fn native_fullscreen_recording_stop_and_save(
 
     let stop_outcome = if session.is_paused {
         #[cfg(target_os = "macos")]
-        if let NativeFullscreenBackend::ScreenCaptureKit { stream, .. } = &mut session.backend {
-            let _ = stream.stop_capture();
+        match &mut session.backend {
+            NativeFullscreenBackend::ScreenCaptureKit { stream, .. }
+            | NativeFullscreenBackend::ScreenCaptureKitPaused { stream } => {
+                let _ = stream.stop_capture();
+            }
+            _ => {}
         }
         Ok(())
     } else {
@@ -529,8 +543,12 @@ pub async fn native_fullscreen_recording_cancel(
         // just stop stream capture without trying to remove an unattached output.
         #[cfg(target_os = "macos")]
         if session.is_paused {
-            if let NativeFullscreenBackend::ScreenCaptureKit { stream, .. } = &mut session.backend {
-                let _ = stream.stop_capture();
+            match &mut session.backend {
+                NativeFullscreenBackend::ScreenCaptureKit { stream, .. }
+                | NativeFullscreenBackend::ScreenCaptureKitPaused { stream } => {
+                    let _ = stream.stop_capture();
+                }
+                _ => {}
             }
         } else {
             let _ = stop_native_recording(&mut session.backend, false);
@@ -626,47 +644,18 @@ pub async fn native_fullscreen_recording_pause(
             segs.push(session.path.clone());
         }
 
-        // --- Step 3: prepare the next segment's recording output ---
+        // --- Step 3: compute next segment path ---
         let seg_index = {
             state.completed_segments.lock().map_err(|e| e.to_string())?.len()
         };
         let new_path = segment_path_for_index(&session.path, seg_index);
         let _ = std::fs::remove_file(&new_path);
 
-        let new_finish = Arc::new(RecordingFinish::new());
-        let new_config = SCRecordingOutputConfiguration::new()
-            .with_output_url(&new_path)
-            .with_video_codec(SCRecordingOutputCodec::H264)
-            .with_output_file_type(SCRecordingOutputFileType::MP4);
-        let new_recording = match SCRecordingOutput::new_with_delegate(
-            &new_config,
-            FinishDelegate { finish: Arc::clone(&new_finish) },
-        ) {
-            Some(r) => r,
-            None => {
-                // Failed to create the next output — restore the session so
-                // Stop/Cancel can still reach the stream. The session is left
-                // in is_paused=true state: the stream is running but nothing is
-                // being written. The user can still stop cleanly.
-                session.backend = NativeFullscreenBackend::ScreenCaptureKit {
-                    stream,
-                    recording: old_recording,
-                    finish: old_finish,
-                };
-                session.is_paused = true;
-                state.inner.lock().map_err(|e| e.to_string())?.replace(session);
-                return Err("Could not create recording output for the next segment.".to_string());
-            }
-        };
-
         // --- Step 4: update session and PUT IT BACK before the blocking wait ---
-        // The session is available in state.inner during the entire finalization
-        // window so Stop/Cancel can proceed concurrently without error.
-        session.backend = NativeFullscreenBackend::ScreenCaptureKit {
-            stream,
-            recording: new_recording,
-            finish: new_finish,
-        };
+        // Store only the stream while paused — no recording output is attached.
+        // A fresh SCRecordingOutput is created on resume (mirroring the start
+        // flow), which is the most reliable way to begin writing a new segment.
+        session.backend = NativeFullscreenBackend::ScreenCaptureKitPaused { stream };
         session.path = new_path;
         session.is_paused = true;
         state.inner.lock().map_err(|e| e.to_string())?.replace(session);
@@ -686,8 +675,11 @@ pub async fn native_fullscreen_recording_pause(
     }
 }
 
-/// Resume a paused native full-screen recording by attaching the prepared
-/// recording output back to the still-running SCStream.
+/// Resume a paused native full-screen recording by creating a fresh
+/// SCRecordingOutput and attaching it to the still-running SCStream.
+/// Creating the output fresh at resume time (rather than pre-creating it
+/// during pause) mirrors the initial start flow and is the most reliable
+/// way to begin writing a new segment to a running stream.
 #[tauri::command]
 pub async fn native_fullscreen_recording_resume(
     state: State<'_, NativeFullscreenRecordingState>,
@@ -700,37 +692,66 @@ pub async fn native_fullscreen_recording_resume(
 
     #[cfg(target_os = "macos")]
     {
-        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-        if let Some(session) = guard.as_mut() {
-            if !session.is_paused {
-                return Ok(());
+        // Take the session out so we don't hold the lock during I/O.
+        let mut session = {
+            let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
+            match guard.take() {
+                Some(s) => s,
+                None => return Ok(()),
             }
+        };
 
-            // Accumulate the pause duration up to this moment and reset paused_at
-            // to now BEFORE calling add_recording_output. This way, if the call
-            // fails and the caller retries, paused_at reflects the retry attempt
-            // rather than the original pause start, preventing the retry delay
-            // from inflating accumulated_pause_ms on the next successful attempt.
-            let now = Instant::now();
-            if let Some(pa) = session.paused_at.replace(now) {
-                session.accumulated_pause_ms += pa.elapsed().as_millis();
-            }
-
-            match &session.backend {
-                NativeFullscreenBackend::ScreenCaptureKit { stream, recording, .. } => {
-                    stream
-                        .add_recording_output(recording)
-                        .map_err(|e| format!("resume: add_recording_output failed: {e:?}"))?;
-                }
-                NativeFullscreenBackend::Screencapture { .. } => {
-                    return Err("Resume not supported in screencapture fallback mode.".into());
-                }
-            }
-
-            // Success — clear the pause marker.
-            session.paused_at = None;
-            session.is_paused = false;
+        if !session.is_paused {
+            state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+            return Ok(());
         }
+
+        // Extract the stream from the paused backend.
+        let stream = match session.backend {
+            NativeFullscreenBackend::ScreenCaptureKitPaused { stream } => stream,
+            NativeFullscreenBackend::Screencapture { .. } => {
+                state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+                return Err("Resume not supported in screencapture fallback mode.".into());
+            }
+            backend => {
+                session.backend = backend;
+                state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+                return Err("resume: unexpected backend state".into());
+            }
+        };
+
+        // Create a fresh recording output — same pattern as start_screencapturekit_recording.
+        let finish = Arc::new(RecordingFinish::new());
+        let config = SCRecordingOutputConfiguration::new()
+            .with_output_url(&session.path)
+            .with_video_codec(SCRecordingOutputCodec::H264)
+            .with_output_file_type(SCRecordingOutputFileType::MP4);
+        let recording = match SCRecordingOutput::new_with_delegate(
+            &config,
+            FinishDelegate { finish: Arc::clone(&finish) },
+        ) {
+            Some(r) => r,
+            None => {
+                session.backend = NativeFullscreenBackend::ScreenCaptureKitPaused { stream };
+                state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+                return Err("Could not create recording output for resumed segment.".to_string());
+            }
+        };
+
+        // Attach the recording output to the still-running stream.
+        if let Err(e) = stream.add_recording_output(&recording) {
+            session.backend = NativeFullscreenBackend::ScreenCaptureKitPaused { stream };
+            state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+            return Err(format!("resume: add_recording_output failed: {e:?}"));
+        }
+
+        // Success — accumulate pause duration and restore active session.
+        if let Some(pa) = session.paused_at.take() {
+            session.accumulated_pause_ms += pa.elapsed().as_millis();
+        }
+        session.backend = NativeFullscreenBackend::ScreenCaptureKit { stream, recording, finish };
+        session.is_paused = false;
+        state.inner.lock().map_err(|e| e.to_string())?.replace(session);
         Ok(())
     }
 }
@@ -1568,6 +1589,11 @@ fn stop_native_recording(
                     }
                 }
             }
+        }
+        #[cfg(target_os = "macos")]
+        NativeFullscreenBackend::ScreenCaptureKitPaused { stream } => {
+            // No recording output is attached while paused; just stop capture.
+            stream.stop_capture().map_err(|e| format!("ScreenCaptureKit stop failed: {e:?}"))
         }
     }
 }
