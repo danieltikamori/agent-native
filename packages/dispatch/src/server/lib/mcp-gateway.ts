@@ -151,6 +151,32 @@ function appBaseUrl(app: DispatchMcpAccessibleApp): string {
   return app.url.replace(/\/+$/, "");
 }
 
+function appBasePath(app: DispatchMcpAccessibleApp): string {
+  const pathname = new URL(appBaseUrl(app)).pathname.replace(/\/+$/, "");
+  return pathname === "/" ? "" : pathname;
+}
+
+function appMatchesUrlPath(app: DispatchMcpAccessibleApp, url: URL): boolean {
+  if (url.origin !== appOrigin(app)) return false;
+  const basePath = appBasePath(app);
+  if (!basePath) return true;
+  return url.pathname === basePath || url.pathname.startsWith(`${basePath}/`);
+}
+
+function appPathSpecificity(app: DispatchMcpAccessibleApp): number {
+  return appBasePath(app).length;
+}
+
+function appRelativePath(app: DispatchMcpAccessibleApp, url: URL): string {
+  const basePath = appBasePath(app);
+  const path = basePath
+    ? url.pathname === basePath
+      ? "/"
+      : url.pathname.slice(basePath.length)
+    : url.pathname;
+  return `${path || "/"}${url.search}${url.hash}`;
+}
+
 function isDispatchControlPath(path: string | null): boolean {
   if (!path) return false;
   const route = path.split(/[?#]/, 1)[0] ?? path;
@@ -359,13 +385,15 @@ async function resolveDispatchEmbedTarget(input: {
   }
 
   const apps = explicitApp ? [explicitApp] : await listGrantedDispatchMcpApps();
-  const target = apps.find((app) => parsed.origin === appOrigin(app));
+  const target = apps
+    .filter((app) => appMatchesUrlPath(app, parsed))
+    .sort((a, b) => appPathSpecificity(b) - appPathSpecificity(a))[0];
   if (!target) {
     throw new Error(
       "Embed URL must belong to an app granted through Dispatch.",
     );
   }
-  const path = safeAppPath(`${parsed.pathname}${parsed.search}${parsed.hash}`);
+  const path = safeAppPath(appRelativePath(target, parsed));
   if (!path) throw new Error("Embed URL path is not safe.");
   assertAppCanOpenPath(target, path);
   return { app: target, path, url: `${appBaseUrl(target)}${path}` };

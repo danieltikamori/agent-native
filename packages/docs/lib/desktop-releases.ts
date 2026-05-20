@@ -112,10 +112,16 @@ export function isDesktopUpdateMetadataAsset(name: string): boolean {
   return DESKTOP_UPDATE_METADATA.has(name);
 }
 
+function isDesktopMacUpdateZipAsset(name: string): boolean {
+  const n = name.toLowerCase();
+  return isAgentNativeAsset(name) && n.endsWith("-mac.zip");
+}
+
 export function isDesktopUpdaterAsset(name: string): boolean {
   return (
     classifyDesktopAsset(name) !== "unknown" ||
     isDesktopUpdateMetadataAsset(name) ||
+    isDesktopMacUpdateZipAsset(name) ||
     (isAgentNativeAsset(name) && name.toLowerCase().endsWith(".blockmap"))
   );
 }

@@ -252,4 +252,44 @@ describe("createGrantedDispatchMcpEmbedSession", () => {
       ),
     ).rejects.toThrow(/safe app-relative route/);
   });
+
+  it("routes same-origin mounted app embed URLs to the mounted app", async () => {
+    mocks.discoverAgents.mockResolvedValue([
+      {
+        ...analyticsAgent,
+        url: "http://localhost:8092/analytics",
+      },
+    ]);
+
+    const result = await runWithRequestContext(
+      {
+        userEmail: "owner@example.test",
+        requestOrigin: "http://localhost:8092",
+      },
+      () =>
+        createGrantedDispatchMcpEmbedSession({
+          url: "http://localhost:8092/analytics/dashboards?range=30d",
+        }),
+    );
+
+    expect(mocks.createEmbedSessionTicket).not.toHaveBeenCalled();
+    expect(mocks.managerConstructor).toHaveBeenCalledWith({
+      servers: {
+        target: expect.objectContaining({
+          url: "http://localhost:8092/analytics/_agent-native/mcp",
+        }),
+      },
+    });
+    expect(mocks.managerCallTool).toHaveBeenCalledWith(
+      "mcp__target__create_embed_session",
+      {
+        url: "http://localhost:8092/analytics/dashboards?range=30d",
+        chrome: "full",
+      },
+    );
+    expect(result).toEqual({
+      app: "analytics",
+      startUrl: "http://localhost:8086/_agent-native/embed/start?ticket=remote",
+    });
+  });
 });

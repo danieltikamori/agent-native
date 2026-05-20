@@ -33,6 +33,9 @@ describe("classifyDesktopAsset", () => {
     expect(isDesktopUpdateMetadataAsset("latest-mac.yml")).toBe(true);
     expect(isDesktopUpdateMetadataAsset("latest.yml")).toBe(true);
     expect(isDesktopUpdaterAsset("latest-linux-arm64.yml")).toBe(true);
+    expect(isDesktopUpdaterAsset("Agent.Native-0.1.7-85-arm64-mac.zip")).toBe(
+      true,
+    );
     expect(isDesktopUpdaterAsset("Agent-Native-x64.exe.blockmap")).toBe(true);
     expect(
       isDesktopUpdaterAsset("Agent.Native-0.1.7-85-arm64-mac.zip.blockmap"),
