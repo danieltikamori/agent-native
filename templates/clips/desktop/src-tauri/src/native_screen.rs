@@ -554,6 +554,14 @@ pub async fn native_fullscreen_recording_cancel(
 /// then prepare a fresh recording output for the next segment. The SCStream
 /// keeps running so resume is instant (no permission prompt, no delay).
 /// The recording output is only re-attached on `native_fullscreen_recording_resume`.
+///
+/// Design notes:
+/// - The session is held out of `state.inner` only for the brief synchronous
+///   operations (remove output, push segment path, create new output). It is
+///   restored to `state.inner` **before** the blocking `old_finish.wait()` so
+///   that concurrent Stop/Cancel calls continue to work during finalization.
+/// - Every error path restores the session to `state.inner` so the stream is
+///   never orphaned.
 #[tauri::command]
 pub async fn native_fullscreen_recording_pause(
     state: State<'_, NativeFullscreenRecordingState>,
@@ -566,6 +574,7 @@ pub async fn native_fullscreen_recording_pause(
 
     #[cfg(target_os = "macos")]
     {
+        // --- Step 1: take the session (brief lock) ---
         let mut session = {
             let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
             match guard.take() {
@@ -575,22 +584,17 @@ pub async fn native_fullscreen_recording_pause(
         };
 
         if session.is_paused {
-            let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-            *guard = Some(session);
+            // Already paused — put it back and return.
+            state.inner.lock().map_err(|e| e.to_string())?.replace(session);
             return Ok(());
         }
 
-        match &session.backend {
-            NativeFullscreenBackend::ScreenCaptureKit { .. } => {}
-            NativeFullscreenBackend::Screencapture { .. } => {
-                let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-                *guard = Some(session);
-                return Err(
-                    "Pause is not supported in screencapture fallback mode.".into(),
-                );
-            }
+        if matches!(&session.backend, NativeFullscreenBackend::Screencapture { .. }) {
+            state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+            return Err("Pause is not supported in screencapture fallback mode.".into());
         }
 
+        // --- Step 2: extract SCKit fields ---
         let (stream, old_recording, old_finish) = match session.backend {
             NativeFullscreenBackend::ScreenCaptureKit { stream, recording, finish } => {
                 (stream, recording, finish)
@@ -598,7 +602,7 @@ pub async fn native_fullscreen_recording_pause(
             _ => unreachable!(),
         };
 
-        // Remove recording output — triggers async MP4 finalization.
+        // Remove the current recording output — triggers async MP4 finalization.
         let remove_result = stream
             .remove_recording_output(&old_recording)
             .map_err(|e| format!("pause: remove_recording_output failed: {e:?}"));
@@ -611,36 +615,20 @@ pub async fn native_fullscreen_recording_pause(
                 })
             }
         };
-
-        // Wait for the MP4 writer to flush before we move on.
-        if remove_result.is_ok() {
-            let outcome = old_finish.wait(SCK_FINALIZE_TIMEOUT);
-            if outcome.is_none() {
-                eprintln!(
-                    "[clips-tray] pause: finalize callback did not fire within {}s",
-                    SCK_FINALIZE_TIMEOUT.as_secs()
-                );
-            }
-        } else {
-            eprintln!(
-                "[clips-tray] pause: segment may not be properly finalized: {:?}",
-                remove_result
-            );
+        if let Err(ref err) = remove_result {
+            eprintln!("[clips-tray] pause: segment may not be properly finalized: {err}");
         }
 
-        // Accumulate this pause interval's start.
+        // Mark pause start and push the completed segment path.
         session.paused_at = Some(Instant::now());
-
-        // Push the completed segment path.
         {
             let mut segs = state.completed_segments.lock().map_err(|e| e.to_string())?;
             segs.push(session.path.clone());
         }
 
-        // Prepare a new path and recording output for when the user resumes.
+        // --- Step 3: prepare the next segment's recording output ---
         let seg_index = {
-            let segs = state.completed_segments.lock().map_err(|e| e.to_string())?;
-            segs.len()
+            state.completed_segments.lock().map_err(|e| e.to_string())?.len()
         };
         let new_path = segment_path_for_index(&session.path, seg_index);
         let _ = std::fs::remove_file(&new_path);
@@ -650,14 +638,30 @@ pub async fn native_fullscreen_recording_pause(
             .with_output_url(&new_path)
             .with_video_codec(SCRecordingOutputCodec::H264)
             .with_output_file_type(SCRecordingOutputFileType::MP4);
-        let new_recording =
-            SCRecordingOutput::new_with_delegate(&new_config, FinishDelegate {
-                finish: Arc::clone(&new_finish),
-            })
-            .ok_or_else(|| {
-                "Could not create recording output for the next segment.".to_string()
-            })?;
+        let new_recording = match SCRecordingOutput::new_with_delegate(
+            &new_config,
+            FinishDelegate { finish: Arc::clone(&new_finish) },
+        ) {
+            Some(r) => r,
+            None => {
+                // Failed to create the next output — restore the session so
+                // Stop/Cancel can still reach the stream. The session is left
+                // in is_paused=true state: the stream is running but nothing is
+                // being written. The user can still stop cleanly.
+                session.backend = NativeFullscreenBackend::ScreenCaptureKit {
+                    stream,
+                    recording: old_recording,
+                    finish: old_finish,
+                };
+                session.is_paused = true;
+                state.inner.lock().map_err(|e| e.to_string())?.replace(session);
+                return Err("Could not create recording output for the next segment.".to_string());
+            }
+        };
 
+        // --- Step 4: update session and PUT IT BACK before the blocking wait ---
+        // The session is available in state.inner during the entire finalization
+        // window so Stop/Cancel can proceed concurrently without error.
         session.backend = NativeFullscreenBackend::ScreenCaptureKit {
             stream,
             recording: new_recording,
@@ -665,9 +669,19 @@ pub async fn native_fullscreen_recording_pause(
         };
         session.path = new_path;
         session.is_paused = true;
+        state.inner.lock().map_err(|e| e.to_string())?.replace(session);
 
-        let mut guard = state.inner.lock().map_err(|e| e.to_string())?;
-        *guard = Some(session);
+        // --- Step 5: wait for old segment finalization OUTSIDE the shared-state lock ---
+        if remove_result.is_ok() {
+            let outcome = old_finish.wait(SCK_FINALIZE_TIMEOUT);
+            if outcome.is_none() {
+                eprintln!(
+                    "[clips-tray] pause: finalize callback did not fire within {}s",
+                    SCK_FINALIZE_TIMEOUT.as_secs()
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -691,6 +705,17 @@ pub async fn native_fullscreen_recording_resume(
             if !session.is_paused {
                 return Ok(());
             }
+
+            // Accumulate the pause duration up to this moment and reset paused_at
+            // to now BEFORE calling add_recording_output. This way, if the call
+            // fails and the caller retries, paused_at reflects the retry attempt
+            // rather than the original pause start, preventing the retry delay
+            // from inflating accumulated_pause_ms on the next successful attempt.
+            let now = Instant::now();
+            if let Some(pa) = session.paused_at.replace(now) {
+                session.accumulated_pause_ms += pa.elapsed().as_millis();
+            }
+
             match &session.backend {
                 NativeFullscreenBackend::ScreenCaptureKit { stream, recording, .. } => {
                     stream
@@ -701,9 +726,9 @@ pub async fn native_fullscreen_recording_resume(
                     return Err("Resume not supported in screencapture fallback mode.".into());
                 }
             }
-            if let Some(pa) = session.paused_at.take() {
-                session.accumulated_pause_ms += pa.elapsed().as_millis();
-            }
+
+            // Success — clear the pause marker.
+            session.paused_at = None;
             session.is_paused = false;
         }
         Ok(())
@@ -1231,12 +1256,12 @@ fn collect_and_merge_segments(
                 }
                 Err(err) => {
                     eprintln!(
-                        "[clips-tray] segment concat failed ({err}); uploading first segment only"
+                        "[clips-tray] segment concat failed ({err}); uploading first segment only. \
+                        Remaining segments are preserved on disk — install ffmpeg (`brew install ffmpeg`) \
+                        to enable automatic concat on future recordings."
                     );
-                    // Return the first (largest) segment so the user doesn't lose everything.
-                    for seg in completed.iter().skip(1) {
-                        let _ = std::fs::remove_file(seg);
-                    }
+                    // Return the first segment; intentionally leave the others on disk
+                    // so the user does not lose the post-pause content.
                     completed.into_iter().next().unwrap()
                 }
             }
