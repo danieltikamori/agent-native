@@ -246,4 +246,66 @@ describe("agent-native skills", () => {
       else process.env.CODEX_HOME = previousCodexHome;
     }
   });
+
+  it("keeps full --json installs clean and aligns user scope for skills", async () => {
+    const root = tmpDir();
+    const home = path.join(root, "home");
+    const codexHome = path.join(root, "codex-home");
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(codexHome, { recursive: true });
+    const previousHome = process.env.HOME;
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.HOME = home;
+    process.env.CODEX_HOME = codexHome;
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const commands: { cmd: string; args: string[]; stdio?: string }[] = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+      stdout.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+
+    try {
+      await runSkills(
+        [
+          "add",
+          "images",
+          "--client",
+          "codex",
+          "--scope",
+          "user",
+          "--yes",
+          "--json",
+        ],
+        {
+          baseDir: root,
+          runCommand: async (cmd, args, options) => {
+            commands.push({ cmd, args, stdio: options?.stdio });
+            return 0;
+          },
+        },
+      );
+
+      const result = JSON.parse(stdout.join(""));
+      expect(result.id).toBe("assets");
+      expect(commands[0]).toMatchObject({
+        cmd: "npx",
+        stdio: "stderr",
+      });
+      expect(commands[0].args).toEqual(expect.arrayContaining(["-g"]));
+      expect(commands[0].args).toEqual(
+        expect.arrayContaining(["--skill", "assets", "-a", "codex"]),
+      );
+      expect(stderr.join("")).toBe("");
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+    }
+  });
 });

@@ -305,10 +305,18 @@ interface SkillInstallTarget {
   cleanup?: () => void;
 }
 
+interface RunCommandOptions {
+  stdio?: "inherit" | "stderr";
+}
+
 interface RunSkillsOptions {
   baseDir?: string;
   log?: (message: string) => void;
-  runCommand?: (cmd: string, args: string[]) => Promise<number>;
+  runCommand?: (
+    cmd: string,
+    args: string[],
+    options?: RunCommandOptions,
+  ) => Promise<number>;
 }
 
 function normalizeKnownSkillTarget(
@@ -477,13 +485,22 @@ function dryRunInstallCommand(
   return commandString("agent-native", args);
 }
 
-async function runCommand(cmd: string, args: string[]): Promise<number> {
+async function runCommand(
+  cmd: string,
+  args: string[],
+  options: RunCommandOptions = {},
+): Promise<number> {
   return new Promise((resolve, reject) => {
+    const pipeToStderr = options.stdio === "stderr";
     const child = spawn(cmd, args, {
-      stdio: "inherit",
+      stdio: pipeToStderr ? ["inherit", "pipe", "pipe"] : "inherit",
       shell: process.platform === "win32",
       env: process.env,
     });
+    if (pipeToStderr) {
+      child.stdout?.on("data", (chunk) => process.stderr.write(chunk));
+      child.stderr?.on("data", (chunk) => process.stderr.write(chunk));
+    }
     child.on("error", reject);
     child.on("exit", (code, signal) => {
       if (signal) {
@@ -545,11 +562,14 @@ export async function addAgentNativeSkill(
         "--copy",
         ...installTarget.skillNames.flatMap((skill) => ["--skill", skill]),
         ...skillsAgents.flatMap((agent) => ["-a", agent]),
+        ...(parsed.scope === "user" ? ["-g"] : []),
         ...(parsed.yes || knownTarget ? ["-y"] : []),
       ];
       commands.push(commandString("npx", args));
       if (!parsed.dryRun) {
-        const code = await (options.runCommand ?? runCommand)("npx", args);
+        const code = await (options.runCommand ?? runCommand)("npx", args, {
+          stdio: parsed.printJson ? "stderr" : "inherit",
+        });
         if (code !== 0) throw new Error(`npx skills add exited with ${code}.`);
       }
     }

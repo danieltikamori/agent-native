@@ -14,6 +14,7 @@ export interface McpOAuthAccessTokenClaims {
   scope: string;
   client_id: string;
   resource: string;
+  jti?: string;
   typ: "agent-native-mcp-oauth";
 }
 
@@ -58,6 +59,8 @@ export async function signMcpOAuthAccessToken(params: {
   scope: string;
   resource: string;
   issuer: string;
+  jti?: string;
+  expiresIn?: string | number;
 }): Promise<string> {
   return new jose.SignJWT({
     typ: "agent-native-mcp-oauth",
@@ -71,9 +74,9 @@ export async function signMcpOAuthAccessToken(params: {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuer(params.issuer)
     .setAudience(params.resource)
-    .setJti(randomUUID())
+    .setJti(params.jti ?? randomUUID())
     .setIssuedAt()
-    .setExpirationTime(MCP_OAUTH_ACCESS_TOKEN_TTL)
+    .setExpirationTime(params.expiresIn ?? MCP_OAUTH_ACCESS_TOKEN_TTL)
     .sign(signingSecret());
 }
 
@@ -86,6 +89,7 @@ export async function verifyMcpOAuthAccessToken(
   orgDomain?: string;
   scopes: string[];
   clientId: string;
+  jti?: string;
 } | null> {
   if (!resource) return null;
   try {
@@ -110,6 +114,7 @@ export async function verifyMcpOAuthAccessToken(
         typeof payload.org_domain === "string" ? payload.org_domain : undefined,
       scopes,
       clientId: payload.client_id,
+      jti: typeof payload.jti === "string" ? payload.jti : undefined,
     };
   } catch {
     return null;
