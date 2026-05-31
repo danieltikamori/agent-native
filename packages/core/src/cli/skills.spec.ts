@@ -253,6 +253,32 @@ describe("agent-native skills", () => {
     }
   });
 
+  it("preserves app base paths in --mcp-url overrides", async () => {
+    const root = tmpDir();
+
+    const result = await addAgentNativeSkill(
+      parseSkillsArgs([
+        "add",
+        "assets",
+        "--client",
+        "claude-code",
+        "--scope",
+        "project",
+        "--mcp-url",
+        "https://self-hosted.example.com/mail",
+      ]),
+      { baseDir: root, runCommand: async () => 0 },
+    );
+
+    expect(result.mcpUrl).toBe(
+      "https://self-hosted.example.com/mail/_agent-native/mcp",
+    );
+    expect(
+      JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf-8"))
+        .mcpServers["agent-native-assets"].url,
+    ).toBe("https://self-hosted.example.com/mail/_agent-native/mcp");
+  });
+
   it("keeps --json output machine-readable for MCP-only installs", async () => {
     const root = tmpDir();
     const home = path.join(root, "home");

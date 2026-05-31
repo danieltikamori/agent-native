@@ -477,6 +477,35 @@ function commandString(cmd: string, args: string[]): string {
   return [cmd, ...args].map(shellArg).join(" ");
 }
 
+function preserveMcpUrlAppPathOverride(
+  target: SkillInstallTarget,
+  input: string | undefined,
+): SkillInstallTarget {
+  if (!input) return target;
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    return target;
+  }
+  const trimmedPath = parsed.pathname.replace(/\/+$/, "");
+  const appPath = trimmedPath.endsWith("/_agent-native/mcp")
+    ? trimmedPath.slice(0, -"/_agent-native/mcp".length).replace(/\/+$/, "")
+    : trimmedPath;
+  if (!appPath) return target;
+  const url = `${parsed.origin}${appPath}`;
+  return {
+    ...target,
+    loaded: {
+      ...target.loaded,
+      manifest: {
+        ...target.loaded.manifest,
+        hosted: { url, mcpUrl: `${url}/_agent-native/mcp` },
+      },
+    },
+  };
+}
+
 function dryRunInstallCommand(
   parsed: ParsedSkillsArgs,
   target: string,
@@ -578,6 +607,7 @@ export async function addAgentNativeSkill(
     installTarget = withMcpUrlOverride(installTarget, parsed.mcpUrl);
   }
   const clients = resolveClients(parsed.client);
+  installTarget = preserveMcpUrlAppPathOverride(installTarget, parsed.mcpUrl);
   const skillsAgents = skillsAgentsForClients(clients);
   if (parsed.dryRun) {
     try {
