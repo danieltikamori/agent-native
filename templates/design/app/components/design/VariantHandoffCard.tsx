@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconCheck, IconCopy } from "@tabler/icons-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -11,26 +11,45 @@ interface VariantHandoffCardProps {
 }
 
 /**
- * Shown after a pick when the editor was opened from a link-only host (CLI /
- * Codex / Claude Code) that can't relay the choice over a chat bridge. The
- * summary is already on the clipboard; this makes the next step obvious and
- * lets the user re-copy or select it by hand.
+ * Shown after a pick (or dismiss) when the editor was opened from a link-only
+ * host (CLI / Codex / Claude Code) that can't relay the choice over a chat
+ * bridge. The card owns the clipboard write so its "Copied" state stays
+ * truthful even when the browser blocks programmatic copy.
  */
 export function VariantHandoffCard({
   pick,
   onDismiss,
 }: VariantHandoffCardProps) {
-  const [copied, setCopied] = useState(true);
+  const [copied, setCopied] = useState(false);
 
-  const copy = async () => {
+  const writeClipboard = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(pick.text);
-      setCopied(true);
-      toast.success("Summary copied");
+      return true;
     } catch {
-      setCopied(false);
-      toast.info("Select the summary to copy it");
+      return false;
     }
+  }, [pick.text]);
+
+  // Auto-copy on mount, but reflect what actually happened: if the browser
+  // blocks the write, leave the button on "Copy summary" so the user knows to
+  // copy (or select) it themselves.
+  useEffect(() => {
+    let active = true;
+    void writeClipboard().then((ok) => {
+      if (active) setCopied(ok);
+    });
+    return () => {
+      active = false;
+    };
+  }, [writeClipboard]);
+
+  const onCopyClick = async () => {
+    const ok = await writeClipboard();
+    setCopied(ok);
+    toast[ok ? "success" : "info"](
+      ok ? "Summary copied" : "Select the summary to copy it",
+    );
   };
 
   return (
@@ -42,17 +61,18 @@ export function VariantHandoffCard({
           </span>
           <div className="min-w-0">
             <div className="text-sm font-medium leading-tight">
-              Direction selected
+              {pick.heading}
             </div>
-            <div className="truncate text-xs text-muted-foreground">
-              “{pick.label}”
-            </div>
+            {pick.label && (
+              <div className="truncate text-xs text-muted-foreground">
+                “{pick.label}”
+              </div>
+            )}
           </div>
         </div>
 
         <p className="mt-3 text-sm text-muted-foreground">
-          Paste this summary into your coding agent to continue from this
-          direction.
+          Paste this summary into your coding agent to continue.
         </p>
 
         <Textarea
@@ -71,7 +91,11 @@ export function VariantHandoffCard({
           >
             Dismiss
           </Button>
-          <Button size="sm" className="cursor-pointer gap-1.5" onClick={copy}>
+          <Button
+            size="sm"
+            className="cursor-pointer gap-1.5"
+            onClick={onCopyClick}
+          >
             {copied ? (
               <IconCheck className="h-3.5 w-3.5" />
             ) : (

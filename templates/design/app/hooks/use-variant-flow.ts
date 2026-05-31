@@ -21,10 +21,12 @@ interface VariantState {
   prompt?: string;
 }
 
-/** A picked variant surfaced as a copyable handoff for link-only hosts. */
+/** A pick/dismiss surfaced as a copyable handoff for link-only hosts. */
 export interface StandalonePick {
-  label: string;
-  variantId: string;
+  /** Card heading, e.g. "Direction selected" or "Closed without picking". */
+  heading: string;
+  /** Chosen variant name, when a direction was picked. */
+  label?: string;
   /** Paste-back text the user copies into their coding agent's chat. */
   text: string;
 }
@@ -69,6 +71,14 @@ function variantHandoffText(
     "",
     "Design selection context:",
     JSON.stringify(context, null, 2),
+  ].join("\n");
+}
+
+function variantDismissText(): string {
+  return [
+    "Paste this back into your chat to keep going.",
+    "",
+    "I closed the design directions without picking one. Show me a different direction.",
   ].join("\n");
 }
 
@@ -207,12 +217,13 @@ export function useVariantFlow(designId: string | undefined) {
         });
       } else if (isLinkOnlyHandoff()) {
         // Link-only host (CLI / Codex / Claude Code): no chat bridge — show a
-        // copyable summary the user pastes back into their coding agent.
-        const text = variantHandoffText(designId, chosen, persisted);
-        setStandalonePick({ label: chosen.label, variantId: chosen.id, text });
-        if (typeof navigator !== "undefined" && navigator.clipboard) {
-          navigator.clipboard.writeText(text).catch(() => {});
-        }
+        // copyable summary the user pastes back into their coding agent. The
+        // card owns the clipboard write so its "Copied" state stays truthful.
+        setStandalonePick({
+          heading: "Direction selected",
+          label: chosen.label,
+          text: variantHandoffText(designId, chosen, persisted),
+        });
       } else {
         // First-party app: post the pick to its own agent sidebar composer.
         sendToAgentChat({
@@ -233,7 +244,15 @@ export function useVariantFlow(designId: string | undefined) {
 
   const dismiss = useCallback(() => {
     clear();
-    if (isLinkOnlyHandoff() && !isEmbedAuthActive()) return;
+    if (isLinkOnlyHandoff() && !isEmbedAuthActive()) {
+      // No chat bridge to relay the dismissal — give the user a copyable note
+      // so their coding agent doesn't wait on a pick that isn't coming.
+      setStandalonePick({
+        heading: "Closed without picking",
+        text: variantDismissText(),
+      });
+      return;
+    }
     sendToAgentChat({
       message: "Close the variants — none of these.",
       context:
