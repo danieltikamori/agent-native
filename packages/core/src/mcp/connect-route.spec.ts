@@ -235,7 +235,10 @@ describe("handleMcpConnect", () => {
       expect(data.mcpServerEntry).toEqual({
         type: "http",
         url: "https://mail.agent-native.com/_agent-native/mcp",
-        headers: { Authorization: `Bearer ${data.token}` },
+        headers: {
+          Authorization: `Bearer ${data.token}`,
+          "X-Agent-Native-MCP-Full-Catalog": "1",
+        },
       });
       expect(data.cli).toBe(
         "agent-native connect https://mail.agent-native.com",
@@ -305,6 +308,10 @@ describe("handleMcpConnect", () => {
         clientId: "agent-native-connect",
         scopes: ["mcp:read", "mcp:write", "mcp:apps"],
       });
+      expect(data.mcpServerEntry.headers).toMatchObject({
+        Authorization: `Bearer ${data.token}`,
+        "X-Agent-Native-MCP-Full-Catalog": "1",
+      });
       expect(Math.round(lifetimeDays)).toBe(365);
       expect(tokenRows[0]).toMatchObject({
         jti: verified?.jti,
@@ -327,7 +334,10 @@ describe("handleMcpConnect", () => {
       expect(data.mcpServerEntry).toEqual({
         type: "http",
         url: "http://localhost:4321/_agent-native/mcp",
-        headers: { "X-Agent-Native-Owner-Email": "u@example.com" },
+        headers: {
+          "X-Agent-Native-Owner-Email": "u@example.com",
+          "X-Agent-Native-MCP-Full-Catalog": "1",
+        },
       });
     });
   });
@@ -551,6 +561,7 @@ describe("handleMcpConnect", () => {
       expect(data.token).toBe("");
       expect(data.mcpServerEntry.headers).toEqual({
         "X-Agent-Native-Owner-Email": "u@example.com",
+        "X-Agent-Native-MCP-Full-Catalog": "1",
       });
     });
 
@@ -589,6 +600,10 @@ describe("handleMcpConnect", () => {
         orgDomain: "builder.io",
         clientId: "agent-native-connect",
         scopes: ["mcp:read", "mcp:write", "mcp:apps"],
+      });
+      expect(data.mcpServerEntry.headers).toMatchObject({
+        Authorization: `Bearer ${data.token}`,
+        "X-Agent-Native-MCP-Full-Catalog": "1",
       });
       expect(Math.round(lifetimeDays)).toBe(365);
       expect(verified?.jti).toBeTruthy();

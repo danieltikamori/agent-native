@@ -63,6 +63,7 @@ import {
 
 /** Device-flow poll interval hint (seconds). */
 const DEVICE_POLL_INTERVAL_S = 3;
+const MCP_FULL_CATALOG_HEADER = "X-Agent-Native-MCP-Full-Catalog";
 
 // Human-typable user code: 8 base32 chars, dashed XXXX-XXXX.
 const USER_CODE_RE = /^[A-Z2-7]{4}-[A-Z2-7]{4}$/;
@@ -266,6 +267,9 @@ function mcpResultPayload(
   if (auth.token) headers.Authorization = `Bearer ${auth.token}`;
   if (!auth.token && auth.ownerEmail) {
     headers["X-Agent-Native-Owner-Email"] = auth.ownerEmail;
+  }
+  if (auth.token || auth.ownerEmail) {
+    headers[MCP_FULL_CATALOG_HEADER] = "1";
   }
   return {
     token: auth.token ?? "",
