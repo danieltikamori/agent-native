@@ -19,7 +19,9 @@ export interface McpOAuthAccessTokenClaims {
 }
 
 function signingSecret(): Uint8Array {
-  return new TextEncoder().encode(process.env.A2A_SECRET || getAuthSecret());
+  return new TextEncoder().encode(
+    process.env.A2A_SECRET?.trim() || getAuthSecret(),
+  );
 }
 
 export function normalizeOAuthScope(input: unknown): string | null {

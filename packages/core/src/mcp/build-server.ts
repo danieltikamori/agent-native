@@ -1719,7 +1719,7 @@ export async function verifyAuth(
   // established that this is a loopback/local dev request. Still honour an
   // owner hint there so the local install/connect flow stays tenant-scoped.
   const accessTokens = getAccessTokens();
-  const hasA2ASecret = !!process.env.A2A_SECRET;
+  const hasA2ASecret = !!process.env.A2A_SECRET?.trim();
   const token = authHeader?.startsWith("Bearer ")
     ? authHeader.slice(7)
     : undefined;

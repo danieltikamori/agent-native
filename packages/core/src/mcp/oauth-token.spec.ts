@@ -171,6 +171,23 @@ describe("signMcpOAuthAccessToken + verifyMcpOAuthAccessToken round-trip", () =>
     delete process.env.A2A_SECRET;
     expect(await verifyMcpOAuthAccessToken(token, RESOURCE)).toBeNull();
   });
+
+  it("ignores whitespace-only A2A_SECRET and falls back to the auth secret", async () => {
+    process.env.A2A_SECRET = "   ";
+    const token = await signMcpOAuthAccessToken(baseSign);
+
+    expect(await verifyMcpOAuthAccessToken(token, RESOURCE)).not.toBeNull();
+    await expect(
+      jose.jwtVerify(token, new TextEncoder().encode("   "), {
+        audience: RESOURCE,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      jose.jwtVerify(token, new TextEncoder().encode("fallback-auth-secret"), {
+        audience: RESOURCE,
+      }),
+    ).resolves.toBeTruthy();
+  });
 });
 
 describe("verifyMcpOAuthAccessToken rejection branches", () => {
