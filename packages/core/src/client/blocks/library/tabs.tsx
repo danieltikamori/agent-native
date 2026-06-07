@@ -76,7 +76,7 @@ function tabButtonClass(
       ? "min-w-0 max-w-72 shrink-0 px-3 py-2 text-left md:w-full md:max-w-none"
       : "shrink-0 whitespace-nowrap px-4 py-2",
     selected
-      ? "border-plan-line bg-plan-block/70 text-plan-text"
+      ? "bg-primary/10 text-plan-text dark:bg-primary/20"
       : "text-plan-muted hover:bg-plan-block/60 hover:text-plan-text",
   );
 }

@@ -199,9 +199,9 @@ function CodeTabsRead({ data, blockId, title }: BlockReadProps<CodeTabsData>) {
               type="button"
               data-plan-interactive
               className={cn(
-                "flex w-full items-start gap-3 border-b border-l-2 border-plan-line border-l-transparent px-4 py-4 text-left",
+                "flex w-full items-start gap-3 border-b border-plan-line px-4 py-4 text-left",
                 tab.id === active?.id
-                  ? "border-l-primary/40 bg-plan-block/70 text-plan-text"
+                  ? "bg-primary/10 text-plan-text dark:bg-primary/20"
                   : "text-plan-muted hover:bg-accent/30",
               )}
               onClick={() => setActiveId(tab.id)}
@@ -372,7 +372,7 @@ function CodeTabsEdit({
                 className={cn(
                   "flex shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border border-transparent px-3 py-2 font-mono text-sm font-semibold transition-colors",
                   selected
-                    ? "border-plan-line bg-plan-block/70 text-plan-text"
+                    ? "bg-primary/10 text-plan-text dark:bg-primary/20"
                     : "text-plan-muted hover:bg-plan-block/60 hover:text-plan-text",
                 )}
               >

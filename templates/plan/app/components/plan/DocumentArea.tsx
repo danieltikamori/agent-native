@@ -401,9 +401,9 @@ function CodeTabsBlock({
               type="button"
               data-plan-interactive
               className={cn(
-                "flex w-full items-start gap-3 border-b border-l-2 border-plan-line border-l-transparent px-4 py-4 text-left",
+                "flex w-full items-start gap-3 border-b border-plan-line px-4 py-4 text-left",
                 tab.id === active?.id
-                  ? "border-l-primary/40 bg-plan-block/70 text-plan-text"
+                  ? "bg-primary/10 text-plan-text dark:bg-primary/20"
                   : "text-plan-muted hover:bg-accent/30",
               )}
               onClick={() => setActiveId(tab.id)}
@@ -580,7 +580,7 @@ function TabsBlock({
                     ? "min-w-0 max-w-72 shrink-0 px-3 py-2 text-left md:w-full md:max-w-none"
                     : "shrink-0 whitespace-nowrap px-4 py-2",
                   selected
-                    ? "border-plan-line bg-plan-block/70 text-plan-text"
+                    ? "bg-primary/10 text-plan-text dark:bg-primary/20"
                     : "text-plan-muted hover:bg-plan-block/60 hover:text-plan-text",
                 )}
               >
