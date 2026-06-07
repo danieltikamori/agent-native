@@ -95,4 +95,16 @@ describe("FileTreeBlock", () => {
     expect(container.innerHTML).toContain("text-plan-muted");
     expect(container.innerHTML).not.toContain("text-amber");
   });
+
+  it("uses the same UI typography for folder and file labels", () => {
+    renderFileTree([{ path: "src/index.ts", change: "modified" }]);
+
+    const labels = Array.from(container.querySelectorAll("span"));
+    const folderLabel = labels.find((span) => span.textContent === "src");
+    const fileLabel = labels.find((span) => span.textContent === "index.ts");
+
+    expect(folderLabel?.className).toContain("font-medium");
+    expect(fileLabel?.className).toContain("font-medium");
+    expect(fileLabel?.className).not.toContain("font-mono");
+  });
 });

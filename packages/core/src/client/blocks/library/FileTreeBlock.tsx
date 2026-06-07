@@ -386,7 +386,7 @@ export function FileTreeRead({
           />
           <span
             className={cn(
-              "min-w-0 truncate font-mono",
+              "min-w-0 truncate font-medium",
               change ? CHANGE_NAME_INK[change] : "text-plan-text",
             )}
           >

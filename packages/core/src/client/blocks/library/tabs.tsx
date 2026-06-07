@@ -75,7 +75,7 @@ function tabButtonClass(
       ? "min-w-0 max-w-72 shrink-0 px-3 py-2 text-left md:w-full md:max-w-none"
       : "shrink-0 whitespace-nowrap px-4 py-2",
     selected
-      ? "bg-muted/50 text-foreground dark:bg-muted/40"
+      ? "bg-primary/5 text-foreground dark:bg-primary/10"
       : "text-muted-foreground hover:bg-muted/40 hover:text-foreground",
   );
 }
