@@ -1456,12 +1456,9 @@ Choose the smallest visual surface that makes the review clear:
 
 - Use a \`Before\` / \`After\` wireframe pair when the reviewer benefits from direct
   comparison, such as a removed or added control, a changed state, layout
-  density, ordering, navigation, or a visible component replacement. Choose the
-  comparison layout by geometry: use a \`columns\` block labeled \`Before\` and
-  \`After\` when each state remains legible side by side; stack \`Before\` then
-  \`After\` vertically in normal document flow when the surfaces are very wide,
-  when full-width scanning matters, or when columns would shrink or crop the
-  important detail.
+  density, ordering, navigation, or a visible component replacement. The
+  Wireframe Quality core below owns how to lay that pair out (columns vs.
+  vertical stack by geometry).
 - Use an after-only wireframe when the change is purely additive or the "before"
   state would only show absence without adding review value.
 - Use more than two wireframes when the UI change is flow-dependent, responsive,
@@ -1478,79 +1475,15 @@ captured, say so in the wireframe caption or a concise annotation. For
 local/manual recaps, import or update the plan source that holds the wireframes
 so the rendered recap opens with the UI visual available.
 
-## UI Wireframe Quality Bar
+## Wireframe Quality
 
 UI recap wireframes must look like the UI surface that changed, not like generic
-architecture boxes. A rendered UI change belongs in \`wireframe\` /
-\`WireframeBlock\`; reserve \`diagram\` for architecture, dependency, state, or
-data-flow relationships.
+architecture boxes. The following bar is shared, word for word, with
+\`/visual-plan\` and \`/ui-plan\`: it is the single source of truth for HTML
+wireframe quality, and applies to a recap's standalone \`wireframe\` /
+\`WireframeBlock\` / \`<Screen>\` exactly as it applies to a plan's canvas artboard.
 
-For small component surfaces, model the actual component shell:
-
-- Popovers, dropdown menus, command palettes, and context menus use
-  \`surface: "popover"\` unless the surrounding page placement is the point of the
-  change.
-- Dialogs, sheets, inspectors, sidebars, and long property panels use the
-  matching \`panel\` / \`desktop\` surface as appropriate.
-- Show the real chrome: trigger or anchor when it matters, title/header row,
-  top-right actions, separators, fields, options, selected states, body content,
-  and footer actions that are visible in the changed workflow.
-
-Before/after wireframes must be comparable:
-
-- Choose the comparison layout deliberately. Side-by-side \`columns\` are best for
-  compact states where placement and density can be compared without shrinking
-  the frames. Very wide surfaces such as full browser rows, tables, diagrams,
-  code/API examples, or dense dashboards should stack vertically (\`Before\` first,
-  then \`After\`) so each wireframe can use the full document width.
-- Label each state visibly as \`Before\` and \`After\` inside the wireframe itself
-  (for example, a header pill), in addition to any column title or caption, so
-  screenshots and cropped embeds stay unambiguous. When states are stacked,
-  repeat the state in the block title or a label immediately above the frame.
-- Treat canvas artboard placement separately from flex layout inside the
-  wireframe. The renderer locks each artboard to its \`surface\` preset
-  (\`desktop\`, \`browser\`, \`popover\`, \`panel\`, etc.) and ignores model-supplied
-  \`width\` / \`height\` when drawing the frame. Prefer omitting \`x\`, \`y\`, \`width\`,
-  and \`height\` so the canvas auto-layout spaces frames correctly. If manual
-  positions are necessary, calculate them from the real surface preset plus a
-  generous gap; never try to "fix" overlap by shrinking \`width\` / \`height\` in
-  MDX.
-- Use the same frame size, scale, outer padding, border radius, and visual
-  density on both sides unless the diff itself changes those properties.
-- Let the frame height fit the useful content when viewport height is not the
-  point. For focused component recaps, prefer \`popover\`, \`panel\`, or an HTML
-  wireframe with content-fit/min-height styling over a tall \`browser\` /
-  \`desktop\` frame that leaves a large empty lower half. Keep a fixed aspect
-  ratio only when the diff changes viewport-scale layout, scrolling, or
-  below-the-fold placement.
-- Treat the \`WireframeBlock\` / \`<Screen>\` border as part of the visible design.
-  Always wrap HTML wireframe content in a root container with real inner padding
-  before drawing cards, fields, pills, labels, or controls. Use at least 14-16px
-  of padding, \`box-sizing: border-box\`, \`height: 100%\`, and \`gap\` between child
-  rows so the first row never sits flush against the screen border.
-- Inside a wireframe, use the kit's flex primitives (\`Row\`, \`Col\`, \`Main\`,
-  \`Box\`) or HTML flex/grid with \`gap\`, \`min-width: 0\`, and sensible overflow.
-  Avoid negative margins, absolute positioning, or fixed child widths that can
-  collide when the Plan renderer switches between light/dark, sketch/clean, or
-  different zoom levels.
-- Keep text away from borders. Every container, field, button, menu item, and
-  annotation needs enough padding and line-height to read cleanly in the rendered
-  Plan view.
-- For tab rails, breadcrumbs, file chips, code filenames, and other intentionally
-  single-line labels, do not let long text wrap. It is acceptable and usually
-  preferable for recap wireframes to use \`white-space: nowrap\`,
-  \`overflow: hidden\`, and \`text-overflow: ellipsis\` (or abstract bars) so the
-  wireframe demonstrates the actual layout behavior instead of producing ugly
-  vertical text. Use horizontally scrollable or clipped rails for overflow.
-- Preserve unchanged controls in both states so the reviewer can see exactly
-  what moved or appeared. Do not show an added control as a generic box floating
-  elsewhere in the surface.
-- Highlight or label the new/changed affordance only after it is placed where
-  the implementation puts it. For example, a new \`Edit with AI\` action in a
-  popover header must appear in the top-right header slot, aligned with the
-  title, not in the body or footer.
-- If the new action opens another popover, menu, or composer, include the opened
-  state only when it clarifies the flow, and anchor it to the actual trigger.
+${WIREFRAME_QUALITY_CORE}
 
 Use the standard \`WireframeBlock\` / \`<Screen>\` format so the Plan viewer owns the
 surface frame, theme, and sketchy/clean toggle. HTML wireframes are appropriate
@@ -1558,17 +1491,12 @@ when placement precision matters, especially popovers, menus, dialogs, and dense
 forms; kit-tree wireframes are appropriate for simpler layouts. For HTML
 wireframes, keep \`renderMode\` unset or \`wireframe\` unless a design-only editable
 mockup is explicitly required, because \`renderMode="design"\` disables the
-sketchy rough overlay. Use renderer-owned \`--wf-*\` tokens, semantic controls, and
-rough targets such as \`[data-rough]\`, \`.wf-card\`, \`.wf-box\`, buttons, inputs, and
-textareas; avoid hard-coded colors, text-only boxes, cramped labels, raw
-coordinate diagrams, and abstract before/after cards that do not resemble the
-product surface.
+sketchy rough overlay.
 
-Before sharing a UI-impact recap, render it in the Plan viewer and inspect the
-top canvas at the current theme. If any artboard, label, annotation, toolbar, or
-wireframe content overlaps another element, fix the MDX and re-import before
-reporting the link. A text-match screenshot is not enough; visually inspect the
-captured image.
+Before sharing a UI-impact recap, render it in the Plan viewer and inspect it at
+the current theme. If any label, annotation, toolbar, or wireframe content
+overlaps another element, fix the MDX and re-import before reporting the link. A
+text-match screenshot is not enough; visually inspect the captured image.
 
 ## Open And Report The Recap
 
@@ -1667,17 +1595,16 @@ comparisons there are two primitives, and they cover the whole need together:
   removed and added lines side by side. Use it for the actual hunks.
 
 For UI diffs, wireframes are the visual comparison primitive. Use before/after
-wireframes when side-by-side review helps; use after-only or a state sequence
-when that better matches the change. The visual headline must show exact
-placement, realistic chrome, and adequate padding before any abstract
-explanation. Put paired UI wireframes inside \`columns\` labeled \`Before\` and
-\`After\`; do not hand-build a side-by-side layout in \`custom-html\` or stack two
-wireframes vertically when columns would make the comparison clearer. For
-document-body comparisons, there is no other multi-column primitive — \`columns\`
-plus split \`diff\` are the whole comparison vocabulary. Do not hand-build
-side-by-side layouts in \`custom-html\`, and do not stack two \`data-model\` blocks
-vertically and call it a comparison when \`columns\` exists to put them side by
-side.
+wireframes when the comparison clarifies the change; use after-only or a state
+sequence when that better matches the change. The visual headline must show
+exact placement, realistic chrome, and adequate padding before any abstract
+explanation. The Wireframe Quality core owns the before/after layout choice
+(side-by-side \`columns\` vs. vertical stack, picked by geometry); never
+hand-build a side-by-side wireframe layout in \`custom-html\`. For document-body
+comparisons, there is no other multi-column primitive — \`columns\` plus split
+\`diff\` are the whole comparison vocabulary. Do not hand-build side-by-side
+layouts in \`custom-html\`, and do not stack two \`data-model\` blocks vertically
+and call it a comparison when \`columns\` exists to put them side by side.
 
 ## Grounding Rule
 
