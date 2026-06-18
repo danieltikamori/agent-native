@@ -16,11 +16,6 @@ import { setResponseHeader, setResponseStatus } from "h3";
 import { getMissingDefaultPlugins } from "../deploy/route-discovery.js";
 import { captureError } from "./capture-error.js";
 import { getConfiguredAppBasePath } from "./app-base-path.js";
-import {
-  DEFAULT_SPECULATION_RULES_PATH,
-  DEFAULT_SSR_CACHE_HEADERS,
-  EMPTY_SPECULATION_RULES,
-} from "../shared/cache-control.js";
 
 const BOOTSTRAPPED = new WeakSet<object>();
 const IN_BOOTSTRAP = new WeakSet<object>();
@@ -34,6 +29,7 @@ const PLUGIN_FAILED_KEY = "_agentNativePluginInitFailures";
 const PROVIDED_PLUGIN_STEMS_KEY = "_agentNativeProvidedPluginStems";
 const MIDDLEWARE_DISPATCHER_PATCHED_KEY =
   "_agentNativeMiddlewareDispatcherPatched";
+const ONREQUEST_GATE_PATCHED_KEY = "_agentNativeOnRequestGatePatched";
 
 interface PluginReadyEntry {
   promise: Promise<void>;
@@ -115,6 +111,7 @@ export function markDefaultPluginProvided(nitroApp: any, stem: string): void {
 export function getH3App(nitroApp: any): H3AppShim {
   if (!nitroApp) throw new Error("getH3App: nitroApp is required");
   ensureGlobalMiddlewareDispatch(nitroApp);
+  ensureReadinessOnRequest(nitroApp);
 
   // Reuse the cached shim if we've wrapped this nitroApp before
   const cached = nitroApp[APP_SHIM_KEY] as H3AppShim | undefined;
@@ -136,28 +133,6 @@ export function getH3App(nitroApp: any): H3AppShim {
   if (!BOOTSTRAPPED.has(nitroApp)) {
     BOOTSTRAPPED.add(nitroApp);
 
-    // Register `speculation-rules.json` eagerly here rather than relying on the
-    // async core-routes plugin. The SSR handler points the Speculation-Rules
-    // response header at this path, so the browser fetches it on the first page
-    // load — before async plugin bootstrap (or a dev HMR app re-create) has
-    // registered the plugin's copy. h3 snapshots the middleware list once at the
-    // start of each request, so a route registered after that snapshot 404s.
-    // This handler is static and side-effect free, so registering it in the
-    // synchronous init block keeps it in the snapshot for every request.
-    shim.use(
-      DEFAULT_SPECULATION_RULES_PATH,
-      ((event: H3Event) => {
-        setResponseHeader(
-          event,
-          "content-type",
-          "application/speculationrules+json; charset=utf-8",
-        );
-        for (const [name, value] of Object.entries(DEFAULT_SSR_CACHE_HEADERS)) {
-          setResponseHeader(event, name, value);
-        }
-        return EMPTY_SPECULATION_RULES;
-      }) as EventHandler,
-    );
     nitroApp[BOOTSTRAP_PROMISE_KEY] = bootstrapDefaultPlugins(nitroApp).catch(
       (err) => {
         console.warn(
@@ -171,10 +146,12 @@ export function getH3App(nitroApp: any): H3AppShim {
       },
     );
 
-    // Readiness gate: Nitro v3 doesn't await async plugins, so routes
-    // registered inside an async plugin may not exist when the first
-    // request arrives. These middleware entries hold framework routes
-    // until default-plugin bootstrap and tracked plugin inits complete.
+    // Fallback readiness gate (middleware). The primary gate is the
+    // `h3.config.onRequest` hook installed by `ensureReadinessOnRequest`, which
+    // awaits readiness BEFORE h3 snapshots the middleware list. This middleware
+    // gate can't fix the snapshot race on its own (it runs after the snapshot is
+    // taken), but it's kept for any runtime that dispatches without honoring
+    // `config.onRequest`, and it carries the per-plugin init-failure 503 logic.
     const readinessGate = (async (event: H3Event) => {
       const eventAny = event as any;
       await awaitFrameworkRoutesReadyForRequest(
@@ -191,12 +168,10 @@ export function getH3App(nitroApp: any): H3AppShim {
       prepend: true,
     });
 
-    // Primary gate: Nitro bridges this `request` hook to h3's `config.onRequest`,
-    // which h3 awaits BEFORE `handler()` snapshots middleware and resolves the
-    // route. The middleware gate above runs too late on production dispatchers —
-    // its await finishes after the snapshot, so a route registered during async
-    // init is missing from the request and 404s. The middleware gate stays as a
-    // fallback for runtimes where `onRequest` isn't wired.
+    // Some Nitro presets bridge their own `request` hook to `config.onRequest`.
+    // Register here too so readiness is awaited on those runtimes even before
+    // `ensureReadinessOnRequest` patches h3 directly. Idempotent: both await the
+    // same readiness promises.
     nitroApp.hooks?.hook?.("request", async (event: H3Event) => {
       const reqPath = event.url?.pathname ?? "";
       if (
@@ -249,6 +224,50 @@ function ensureGlobalMiddlewareDispatch(nitroApp: any): void {
 
   h3["~getMiddleware"] = wrappedGetMiddleware;
   h3[MIDDLEWARE_DISPATCHER_PATCHED_KEY] = wrappedGetMiddleware;
+}
+
+/**
+ * Primary readiness gate.
+ *
+ * Nitro v3 calls plugins synchronously and does not await async plugin init, so
+ * routes registered inside an async plugin (e.g. core-routes) may not exist yet
+ * when the first request arrives. h3 reads its middleware list exactly once per
+ * request — inside `handler()`, via `~getMiddleware()` — so a route registered
+ * after that snapshot is invisible to the in-flight request and 404s.
+ *
+ * h3's `~request()` awaits `config.onRequest` BEFORE calling `handler()` (see
+ * h3 core: `hookRes.then(() => this.handler(event))`). By patching
+ * `config.onRequest` to await framework readiness, we guarantee async routes
+ * are registered before the snapshot is taken — so they dispatch naturally, in
+ * order, with no per-route eager registration or post-snapshot re-dispatch.
+ *
+ * Nitro's production builds wire `config.onRequest` to their own request hook;
+ * the dev runtime stub does not (it constructs `new H3Core({ onError })` with
+ * `hooks: undefined`). Patching h3 directly closes the gap on every runtime.
+ */
+function ensureReadinessOnRequest(nitroApp: any): void {
+  const h3 = nitroApp?.h3;
+  if (!h3) return;
+  const config = h3.config ?? (h3.config = {});
+  if (config.onRequest && config.onRequest === config[ONREQUEST_GATE_PATCHED_KEY])
+    return;
+
+  const previous =
+    typeof config.onRequest === "function" ? config.onRequest : undefined;
+
+  const patched = async (event: H3Event) => {
+    if (previous) await previous(event);
+    const reqPath = event.url?.pathname ?? "";
+    if (
+      resolveMountMatch(reqPath, FRAMEWORK_PREFIX) ||
+      resolveMountMatch(reqPath, WELL_KNOWN_PREFIX)
+    ) {
+      await awaitFrameworkRoutesReadyForRequest(nitroApp, reqPath);
+    }
+  };
+
+  config.onRequest = patched;
+  config[ONREQUEST_GATE_PATCHED_KEY] = patched;
 }
 
 /**

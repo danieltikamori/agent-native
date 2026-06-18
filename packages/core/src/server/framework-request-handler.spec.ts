@@ -62,27 +62,6 @@ describe("framework request handler", () => {
     vi.restoreAllMocks();
   });
 
-  it("serves speculation-rules.json eagerly without waiting for async plugin registration", async () => {
-    const nitroApp = createNitroApp();
-    // First getH3App call installs the eager static route synchronously, before
-    // any async plugin (core-routes) would register its own copy.
-    getH3App(nitroApp);
-
-    await expect(
-      dispatch(nitroApp, "/_agent-native/speculation-rules.json"),
-    ).resolves.toEqual({ prefetch: [], prerender: [] });
-  });
-
-  it("serves speculation-rules.json eagerly under APP_BASE_PATH", async () => {
-    process.env.APP_BASE_PATH = "/docs";
-    const nitroApp = createNitroApp();
-    getH3App(nitroApp);
-
-    await expect(
-      dispatch(nitroApp, "/docs/_agent-native/speculation-rules.json"),
-    ).resolves.toEqual({ prefetch: [], prerender: [] });
-  });
-
   it("dispatches bare framework routes with a mount-relative pathname", async () => {
     const nitroApp = createNitroApp();
     getH3App(nitroApp).use("/_agent-native/extensions", (event: any) => ({
@@ -435,6 +414,31 @@ describe("framework request handler", () => {
     return next();
   }
 
+  // Faithful model of h3 core's `~request()`: it awaits `config.onRequest`
+  // BEFORE `handler()` snapshots the middleware list. This is the gate that
+  // works on every runtime, including the dev stub that wires neither Nitro
+  // hooks nor its own onRequest.
+  async function dispatchViaH3Request(nitroApp: any, pathname: string) {
+    const event = {
+      method: "GET",
+      url: new URL(`http://example.test${pathname}`),
+      path: pathname,
+      context: {},
+      res: { status: 200, headers: new Headers() },
+    };
+    const onRequest = nitroApp.h3?.config?.onRequest;
+    if (typeof onRequest === "function") await onRequest(event);
+    // handler(): snapshot the middleware list ONCE, then run that snapshot.
+    const snapshot = [...nitroApp.h3["~middleware"]];
+    let index = 0;
+    const next = async (): Promise<unknown> => {
+      const mw = snapshot[index++];
+      if (!mw) return { fellThrough: true };
+      return mw(event, next);
+    };
+    return next();
+  }
+
   it("(bug) middleware-only gate falls through to 404 when the route registers after the snapshot", async () => {
     const nitroApp = createHookableNitroApp();
     let registerRoute!: () => void;
@@ -486,6 +490,58 @@ describe("framework request handler", () => {
     registerRoute();
 
     await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("delivers a route registered during async init via the h3 onRequest gate (dev runtime, no Nitro hooks)", async () => {
+    // Plain nitroApp with no `hooks` — models Nitro's dev stub
+    // (`new H3Core({ onError })`, `hooks: undefined`). Only the
+    // `h3.config.onRequest` gate can rescue this path.
+    const nitroApp = createNitroApp();
+    let registerRoute!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      registerRoute = () => {
+        getH3App(nitroApp).use(
+          "/_agent-native/actions/update-visual-plan",
+          () => ({ ok: true }),
+        );
+        resolve();
+      };
+    });
+    trackPluginInit(nitroApp, ready, { paths: ["/_agent-native/actions"] });
+
+    const pending = dispatchViaH3Request(
+      nitroApp,
+      "/_agent-native/actions/update-visual-plan",
+    );
+    // Init completes while h3 awaits config.onRequest, before the snapshot.
+    await Promise.resolve();
+    registerRoute();
+
+    await expect(pending).resolves.toEqual({ ok: true });
+  });
+
+  it("serves a late-registered speculation-rules route via the onRequest gate", async () => {
+    const nitroApp = createNitroApp();
+    let registerRoute!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      registerRoute = () => {
+        getH3App(nitroApp).use(
+          "/_agent-native/speculation-rules.json",
+          () => ({ prefetch: [], prerender: [] }),
+        );
+        resolve();
+      };
+    });
+    trackPluginInit(nitroApp, ready, { paths: ["/_agent-native"] });
+
+    const pending = dispatchViaH3Request(
+      nitroApp,
+      "/_agent-native/speculation-rules.json",
+    );
+    await Promise.resolve();
+    registerRoute();
+
+    await expect(pending).resolves.toEqual({ prefetch: [], prerender: [] });
   });
 
   it("does not treat similar non-prefixed paths as framework routes", async () => {
