@@ -1,7 +1,9 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { CameraIcon, CheckIcon, ChevronDown, MicIcon } from "./Icons";
 import { Switch } from "./Switch";
 import { useRowMenu } from "./useRowMenu";
+
+const WAVE_BARS = 18;
 
 function Toggle({
   on,
@@ -25,13 +27,87 @@ function Toggle({
   );
 }
 
-function MicWave() {
+// Live mic level meter. Opens a stream on the selected device, runs it through
+// an AnalyserNode, and drives the bar heights from real audio so users can see
+// their mic is actually picking up sound.
+function MicWave({ deviceId, active }: { deviceId: string; active: boolean }) {
+  const barsRef = useRef<(HTMLSpanElement | null)[]>([]);
+
+  useEffect(() => {
+    if (!active) return;
+    let stream: MediaStream | null = null;
+    let audioCtx: AudioContext | null = null;
+    let raf = 0;
+    let cancelled = false;
+
+    const flatten = () => {
+      for (const bar of barsRef.current) {
+        if (bar) bar.style.height = "10%";
+      }
+    };
+
+    const start = async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: deviceId ? { deviceId: { exact: deviceId } } : true,
+          video: false,
+        });
+        if (cancelled) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+          return;
+        }
+        audioCtx = new AudioContext();
+        const sourceNode = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 64;
+        analyser.smoothingTimeConstant = 0.7;
+        sourceNode.connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+
+        const tick = () => {
+          analyser.getByteFrequencyData(data);
+          const usable = Math.floor(data.length * 0.7);
+          for (let i = 0; i < WAVE_BARS; i++) {
+            const bar = barsRef.current[i];
+            if (!bar) continue;
+            const idx = Math.min(
+              usable - 1,
+              Math.floor((i / WAVE_BARS) * usable),
+            );
+            const level = data[idx] / 255;
+            bar.style.height = `${Math.max(10, Math.min(100, level * 130))}%`;
+          }
+          raf = requestAnimationFrame(tick);
+        };
+        tick();
+      } catch {
+        // Mic unavailable or access denied — leave the bars flat.
+        flatten();
+      }
+    };
+
+    void start();
+
+    return () => {
+      cancelled = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (audioCtx) audioCtx.close().catch(() => {});
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, [deviceId, active]);
+
   return (
     <span className="mic-wave" aria-hidden>
-      <span className="bar b1" />
-      <span className="bar b2" />
-      <span className="bar b3" />
-      <span className="bar b4" />
+      {Array.from({ length: WAVE_BARS }).map((_, i) => (
+        <span
+          key={i}
+          className="bar"
+          ref={(el) => {
+            barsRef.current[i] = el;
+          }}
+        />
+      ))}
     </span>
   );
 }
@@ -47,6 +123,7 @@ export function MediaDeviceRow({
   onToggle,
   systemAudio,
   onSystemAudioToggle,
+  meterActive = true,
 }: {
   kind: "camera" | "mic";
   devices: MediaDeviceInfo[];
@@ -58,6 +135,7 @@ export function MediaDeviceRow({
   onToggle: (v: boolean) => void;
   systemAudio?: boolean;
   onSystemAudioToggle?: (v: boolean) => void;
+  meterActive?: boolean;
 }) {
   const current = useMemo(
     () =>
@@ -117,7 +195,9 @@ export function MediaDeviceRow({
         onChange={onToggle}
         label={kind === "camera" ? "Camera" : "Microphone"}
       />
-      {kind === "mic" && on ? <MicWave /> : null}
+      {kind === "mic" && on ? (
+        <MicWave deviceId={selectedId} active={on && meterActive} />
+      ) : null}
       {open ? (
         <div className="row-menu" role="menu">
           <button

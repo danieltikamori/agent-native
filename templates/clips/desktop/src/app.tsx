@@ -2435,6 +2435,7 @@ export function App() {
           onToggle={setMicOn}
           systemAudio={systemAudioOn}
           onSystemAudioToggle={setSystemAudioOn}
+          meterActive={popoverVisible && !isRecording}
         />
       </div>
 
