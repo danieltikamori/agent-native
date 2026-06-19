@@ -12,7 +12,7 @@ beta's peer requirement for downstream consumers of the published package.
 Fixes a dev-only 404 for extension-bearing framework endpoints such as
 `/_agent-native/speculation-rules.json` and `/.well-known/agent-card.json`.
 Nitro's Vite dev middleware classifies any request whose path has an asset-like
-extension as a static asset (handing it to Vite) unless a Nitro *route* matches
+extension as a static asset (handing it to Vite) unless a Nitro _route_ matches
 it. Framework endpoints are registered as h3 middleware, invisible to Nitro's
 route table, so their `.json`/`.png` URLs were misrouted to Vite and 404'd
 before reaching the server (extensionless routes like `/ping` were unaffected).

@@ -85,9 +85,7 @@ describe("dev server mounted path helpers", () => {
   });
 
   it("forces Nitro's dev classifier to treat framework assets as dynamic", () => {
-    const plugin = findPlugin(
-      "agent-native-framework-dev-dynamic-forwarder",
-    );
+    const plugin = findPlugin("agent-native-framework-dev-dynamic-forwarder");
     let middleware: Function | null = null;
     const server = {
       config: { base: "/" },

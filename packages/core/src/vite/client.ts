@@ -854,7 +854,9 @@ function frameworkDevDynamicForwarder(): Plugin {
         if (url && isFrameworkDynamicDevPath(url, server.config.base)) {
           const accept = req.headers["accept"];
           if (typeof accept !== "string" || !/\btext\/html\b/.test(accept)) {
-            req.headers["accept"] = accept ? `text/html,${accept}` : "text/html";
+            req.headers["accept"] = accept
+              ? `text/html,${accept}`
+              : "text/html";
           }
           req.headers["sec-fetch-dest"] = "empty";
         }
