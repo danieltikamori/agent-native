@@ -40,20 +40,112 @@ import {
   resolveConfig,
 } from "./builder-client.ts";
 import {
+  assertModelAllowedForLive,
+  isTestModelName,
   makeThrowawayName,
   parseFlags,
   type RunFlags,
   ThrowawayRegistry,
 } from "./safety.ts";
 
+function isTestModelOrAllowed(flags: RunFlags): boolean {
+  return isTestModelName(flags.model) || flags.allowModels.includes(flags.model);
+}
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const EVIDENCE_DIR = join(HERE, "evidence");
 
 interface FindingRecord {
   question: string;
-  status: "answered" | "blocked";
+  /**
+   * - `answered`: invariants were asserted and held.
+   * - `failed`: an asserted invariant did NOT hold (contract violated). The run
+   *   exits nonzero and this must NOT be read as a GO.
+   * - `blocked`: could not run (missing creds/space, or gated probe skipped).
+   */
+  status: "answered" | "failed" | "blocked";
   evidenceLabels: string[];
   note: string;
+}
+
+/** A single asserted invariant and whether it held. */
+interface Assertion {
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+function bodyRecord(exchange: CapturedExchange): Record<string, unknown> | null {
+  const body = exchange.response.body;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+  return null;
+}
+
+/** The single delivered entry from a getDeliveredEntry response, if present. */
+function deliveredEntry(
+  exchange: CapturedExchange,
+): Record<string, unknown> | null {
+  const rec = bodyRecord(exchange);
+  if (!rec) return null;
+  // Delivery may return the entry directly or wrapped in { results: [...] }.
+  if (Array.isArray(rec.results)) {
+    const first = rec.results[0];
+    return first && typeof first === "object"
+      ? (first as Record<string, unknown>)
+      : null;
+  }
+  return rec;
+}
+
+function markerOf(entry: Record<string, unknown> | null): unknown {
+  if (!entry) return undefined;
+  const data = entry.data;
+  return data && typeof data === "object"
+    ? (data as Record<string, unknown>).marker
+    : undefined;
+}
+
+function metaHasAutosaves(entry: Record<string, unknown> | null): unknown {
+  if (!entry) return undefined;
+  const meta = entry.meta;
+  return meta && typeof meta === "object"
+    ? (meta as Record<string, unknown>).hasAutosaves
+    : undefined;
+}
+
+/**
+ * Turn a set of assertions into a finding. If every assertion held, the finding
+ * is `answered`; otherwise it is `failed` and carries the failing details.
+ */
+function findingFromAssertions(
+  question: string,
+  evidenceLabels: string[],
+  assertions: Assertion[],
+  passNote: string,
+): FindingRecord {
+  const failures = assertions.filter((a) => !a.ok);
+  if (failures.length === 0) {
+    return {
+      question,
+      status: "answered",
+      evidenceLabels,
+      note:
+        `${passNote} Asserted: ` +
+        assertions.map((a) => `${a.label} (${a.detail})`).join("; ") +
+        ".",
+    };
+  }
+  return {
+    question,
+    status: "failed",
+    evidenceLabels,
+    note:
+      "CONTRACT VIOLATION — " +
+      failures.map((a) => `${a.label}: ${a.detail}`).join("; ") +
+      ".",
+  };
 }
 
 function entryIdFrom(exchange: CapturedExchange): string | undefined {
@@ -89,23 +181,30 @@ async function runLive(
   client: BuilderContractClient,
   flags: RunFlags,
 ): Promise<{ findings: FindingRecord[] }> {
-  const registry = new ThrowawayRegistry();
+  const registry = new ThrowawayRegistry(flags.allowModels);
   const findings: FindingRecord[] = [];
   const model = flags.model;
 
-  // --- Step 0: create a throwaway entry and PUBLISH it ---------------------
+  // Gate the model BEFORE any write. Throws (and aborts the run) unless the
+  // model is test-named or explicitly --allow-model'd. There is no default
+  // production model. The returned token is the only thing createEntry accepts.
+  const mutableModel = assertModelAllowedForLive(model, flags.allowModels);
+
+  // --- Step 0: create a throwaway entry as a DRAFT (never published) --------
+  // Creating as a draft means even the throwaway entry is never pushed live;
+  // the autosave probe still exercises the staging path against it.
   const name = makeThrowawayName();
-  log(`\n[create] creating + publishing throwaway entry "${name}" in model "${model}"`);
+  log(`\n[create] creating DRAFT throwaway entry "${name}" in model "${model}"`);
   const created = await client.createEntry({
-    label: "create-published-throwaway",
-    model,
+    label: "create-draft-throwaway",
+    target: mutableModel,
     body: {
       name,
-      published: "published",
+      published: "draft",
       data: {
         title: name,
         handle: name,
-        marker: "v1-original-published",
+        marker: "v1-original-draft",
       },
     },
   });
@@ -120,7 +219,7 @@ async function runLive(
         {
           question: "ALL",
           status: "blocked",
-          evidenceLabels: ["create-published-throwaway"],
+          evidenceLabels: ["create-draft-throwaway"],
           note:
             `Could not create a throwaway entry (HTTP ${created.response.status}). ` +
             `Likely the model "${model}" does not exist in this space, or the ` +
@@ -129,43 +228,44 @@ async function runLive(
       ],
     };
   }
-  registry.register(entryId, name);
+  // Mint the mutable target for this entry. From here, every mutation must use
+  // the token; a bare id cannot reach a mutator.
+  const target = registry.register(mutableModel, entryId, name);
   log(`[create] created entry id=${entryId}`);
 
-  // Baseline live delivery (what visitors see) before any autosave.
-  await client.getDeliveredEntry({
-    label: "q1-baseline-live-delivery",
-    model,
-    entryId,
-    cachebust: true,
-  });
-  await client.getDeliveredEntry({
-    label: "q2-baseline-include-unpublished",
+  // Baseline delivery (with includeUnpublished, since the entry is a draft)
+  // before any autosave. This is the reference the after-state is asserted
+  // against.
+  const baselineDelivery = await client.getDeliveredEntry({
+    label: "q1-baseline-delivery",
     model,
     entryId,
     includeUnpublished: true,
     cachebust: true,
   });
+  const baselineEntry = deliveredEntry(baselineDelivery);
+  const baselinePublished = baselineEntry?.published;
+  const baselineMarker = markerOf(baselineEntry);
 
-  // --- Q1/Q2: autoSaveOnly=true PATCH against the published entry ----------
-  registry.assertMutable(entryId, "autoSaveOnly PATCH");
+  // --- Q1/Q2: autoSaveOnly=true PATCH against the entry --------------------
+  const autosaveTarget = registry.assertMutable(entryId, "autoSaveOnly PATCH");
   log(`[autosave] PATCH ...?autoSaveOnly=true&triggerWebhooks=false on ${entryId}`);
-  await client.patchEntry({
+  const autosavePatch = await client.patchEntry({
     label: "q1-autosave-patch",
-    model,
-    entryId,
+    target: autosaveTarget,
     query: { autoSaveOnly: "true", triggerWebhooks: "false" },
     body: { data: { marker: "v2-autosaved-should-NOT-go-live" } },
   });
 
-  // Re-read live delivery + includeUnpublished AFTER autosave.
-  await client.getDeliveredEntry({
-    label: "q1-live-delivery-after-autosave",
+  // Re-read delivery (published view) + includeUnpublished AFTER autosave.
+  const afterPublishedView = await client.getDeliveredEntry({
+    label: "q1-delivery-after-autosave",
     model,
     entryId,
+    includeUnpublished: true,
     cachebust: true,
   });
-  await client.getDeliveredEntry({
+  const afterIncludeUnpublished = await client.getDeliveredEntry({
     label: "q2-include-unpublished-after-autosave",
     model,
     entryId,
@@ -173,48 +273,71 @@ async function runLive(
     cachebust: true,
   });
 
-  findings.push({
-    question:
-      "Q1: Does autoSaveOnly=true leave the live published artifact unchanged?",
-    status: "answered",
-    evidenceLabels: [
-      "q1-baseline-live-delivery",
-      "q1-autosave-patch",
-      "q1-live-delivery-after-autosave",
-    ],
-    note:
-      "Compare the `marker` field in q1-baseline-live-delivery vs " +
-      "q1-live-delivery-after-autosave. If unchanged (still v1-original), " +
-      "autosave is non-destructive to the live artifact.",
-  });
-  findings.push({
-    question:
-      "Q2: Does autosave create a History revision / change lastUpdated / cache?",
-    status: "answered",
-    evidenceLabels: [
-      "q2-baseline-include-unpublished",
-      "q1-autosave-patch",
-      "q2-include-unpublished-after-autosave",
-    ],
-    note:
-      "Inspect the autosave response body and the includeUnpublished read for " +
-      "revision/draft fields and lastUpdated. triggerWebhooks=false in the " +
-      "query controls webhook firing; the response status/body is the evidence.",
-  });
+  const afterEntry = deliveredEntry(afterPublishedView);
+  const afterPublished = afterEntry?.published;
+  const afterMarker = markerOf(afterEntry);
+  const afterHasAutosaves = metaHasAutosaves(deliveredEntry(afterIncludeUnpublished));
+
+  // Q1: the autosave write must succeed AND the delivered (published-state)
+  // artifact must NOT move: published state unchanged, delivered marker
+  // unchanged from baseline.
+  findings.push(
+    findingFromAssertions(
+      "Q1: Does autoSaveOnly=true leave the live/published artifact unchanged?",
+      ["q1-baseline-delivery", "q1-autosave-patch", "q1-delivery-after-autosave"],
+      [
+        {
+          label: "autosave PATCH HTTP ok",
+          ok: autosavePatch.response.ok,
+          detail: `HTTP ${autosavePatch.response.status}`,
+        },
+        {
+          label: "published state unchanged",
+          ok: afterPublished === baselinePublished,
+          detail: `baseline=${String(baselinePublished)} after=${String(afterPublished)}`,
+        },
+        {
+          label: "delivered marker unchanged",
+          ok: afterMarker === baselineMarker,
+          detail: `baseline=${JSON.stringify(baselineMarker)} after=${JSON.stringify(afterMarker)}`,
+        },
+      ],
+      "autoSaveOnly=true staged a revision without moving the delivered artifact.",
+    ),
+  );
+
+  // Q2: autosave must flip meta.hasAutosaves to true.
+  findings.push(
+    findingFromAssertions(
+      "Q2: Does autosave create a History autosave (meta.hasAutosaves flips true)?",
+      ["q1-autosave-patch", "q2-include-unpublished-after-autosave"],
+      [
+        {
+          label: "meta.hasAutosaves === true after autosave",
+          ok: afterHasAutosaves === true,
+          detail: `hasAutosaves=${String(afterHasAutosaves)}`,
+        },
+      ],
+      "The autosave PATCH produced a staged autosave revision.",
+    ),
+  );
 
   // --- Q4: identify live vs autosaved revision fields ----------------------
+  // This is descriptive (field-shape), not an invariant — record it as answered
+  // with the concrete observed distinguishing fields.
   findings.push({
     question: "Q4: Which response fields distinguish live vs autosaved revision?",
     status: "answered",
     evidenceLabels: [
       "q1-autosave-patch",
-      "q1-live-delivery-after-autosave",
+      "q1-delivery-after-autosave",
       "q2-include-unpublished-after-autosave",
     ],
     note:
-      "Diff the field set across the three: the live delivery shows the " +
-      "published revision; includeUnpublished surfaces the staged one. Look " +
-      "for `published`, `lastUpdated`, `meta`, `id` and any revision markers.",
+      "Observed distinguishing fields: published=" +
+      `${String(afterPublished)}, meta.hasAutosaves=${String(afterHasAutosaves)}. ` +
+      "The delivered (published-state) revision and the staged autosave are " +
+      "independent: published/marker stayed put while hasAutosaves flipped.",
   });
 
   // --- Q5: duplicate-handle / listing semantics ---------------------------
@@ -239,33 +362,54 @@ async function runLive(
 
   // --- Q3: DESTRUCTIVE published:"draft" probe (gated) --------------------
   if (flags.allowUnpublishTest) {
-    registry.assertMutable(entryId, "published:draft unpublish PATCH");
+    const unpublishTarget = registry.assertMutable(
+      entryId,
+      "published:draft unpublish PATCH",
+    );
     log(
       `[unpublish] (--allow-unpublish-test) PATCH published:"draft" on ${entryId}`,
     );
-    await client.patchEntry({
+    const unpublishPatch = await client.patchEntry({
       label: "q3-unpublish-patch",
-      model,
-      entryId,
+      target: unpublishTarget,
       query: { triggerWebhooks: "false" },
       body: { published: "draft" },
     });
-    await client.getDeliveredEntry({
-      label: "q3-live-delivery-after-unpublish",
+    const afterUnpublishPublished = await client.getDeliveredEntry({
+      label: "q3-published-delivery-after-unpublish",
       model,
       entryId,
       cachebust: true,
     });
-    findings.push({
-      question:
-        "Q3: What does published:\"draft\" (no autoSaveOnly) do to a live entry?",
-      status: "answered",
-      evidenceLabels: ["q3-unpublish-patch", "q3-live-delivery-after-unpublish"],
-      note:
-        "If q3-live-delivery-after-unpublish returns 0 results / 404 while the " +
-        "entry still exists under includeUnpublished, the draft path UNPUBLISHED " +
-        "the live artifact — the destructive risk the gate guards against.",
-    });
+    // Published-only delivery should now find nothing (entry is draft).
+    const publishedRec = bodyRecord(afterUnpublishPublished);
+    const publishedResultCount =
+      publishedRec && Array.isArray(publishedRec.results)
+        ? publishedRec.results.length
+        : afterUnpublishPublished.response.status === 404
+          ? 0
+          : null;
+    findings.push(
+      findingFromAssertions(
+        'Q3: What does published:"draft" (no autoSaveOnly) do to delivery?',
+        ["q3-unpublish-patch", "q3-published-delivery-after-unpublish"],
+        [
+          {
+            label: "unpublish PATCH HTTP ok",
+            ok: unpublishPatch.response.ok,
+            detail: `HTTP ${unpublishPatch.response.status}`,
+          },
+          {
+            label: "published-only delivery no longer returns the entry",
+            ok: publishedResultCount === 0,
+            detail: `published-only results=${String(publishedResultCount)} ` +
+              `(status ${afterUnpublishPublished.response.status})`,
+          },
+        ],
+        'published:"draft" removed the entry from published delivery — the ' +
+          "destructive unpublish the production gate guards against.",
+      ),
+    );
   } else {
     findings.push({
       question:
@@ -291,17 +435,20 @@ async function runLive(
 function printPlan(flags: RunFlags, client: BuilderContractClient): void {
   log("Builder autoSaveOnly contract harness — PLAN (no --live, no network)\n");
   log(`  model:                 ${flags.model}`);
+  log(`  model allowed (live):  ${isTestModelOrAllowed(flags) ? "yes" : "NO — would abort"}`);
+  log(`  extra --allow-model:   ${flags.allowModels.length ? flags.allowModels.join(", ") : "(none)"}`);
   log(`  write credentials:     ${client.hasWriteCredentials() ? "present" : "MISSING"}`);
-  log(`  delivery credentials:  ${client.hasReadCredentials() ? "present" : "MISSING"}`);
+  log(`  delivery credentials:  ${client.hasReadCredentials() ? "present" : "MISSING (required for --live)"}`);
   log(`  unpublish probe (Q3):  ${flags.allowUnpublishTest ? "enabled" : "disabled"}`);
   log("\nSteps that WOULD run with --live:");
-  log("  0. POST create + publish throwaway entry (zz-autosave-contract-test-*)");
-  log("  1. GET baseline live delivery + includeUnpublished");
+  log("  0. POST create throwaway entry as DRAFT (zz-autosave-contract-test-*)");
+  log("  1. GET baseline delivery (includeUnpublished)");
   log("  2. PATCH ?autoSaveOnly=true&triggerWebhooks=false  (Q1/Q2/Q4)");
-  log("  3. GET live delivery + includeUnpublished after autosave");
+  log("  3. GET delivery + includeUnpublished after autosave; ASSERT invariants");
   log("  4. GET query by handle (Q5 duplicate/listing)");
   log("  5. [gated] PATCH published:draft + re-read (Q3 unpublish risk)");
-  log("\nAdd --live to execute. Credentials must be in env (e.g. --env-file=.env.local).");
+  log("\nAdd --live to execute. Requires write AND delivery credentials in env.");
+  log("Live writes refuse any model that is not test-named or --allow-model'd.");
 }
 
 function writeEvidence(
@@ -348,10 +495,17 @@ async function main(): Promise<void> {
     return;
   }
   if (!client.hasReadCredentials()) {
+    // The whole contract rests on reading delivered state before/after the
+    // write. Without a delivery key we cannot assert the invariants, so we must
+    // NOT emit "answered"/GO conclusions. Refuse the full live run.
     log(
-      "WARNING: no BUILDER_API_KEY (public delivery key) — write probes will " +
-        "run but delivery reads (the live-artifact evidence) will fail.",
+      "BLOCKED: --live requires BUILDER_API_KEY (public delivery key) to read " +
+        "delivered state and assert the autosave invariants. Without it the " +
+        "harness cannot verify the contract and refuses to emit a GO. Provide " +
+        "the delivery key (or run probe-readonly.ts for read-only shape only).",
     );
+    process.exitCode = 2;
+    return;
   }
 
   log(`Builder autoSaveOnly contract harness — LIVE run`);
@@ -385,6 +539,19 @@ async function main(): Promise<void> {
 
   const file = writeEvidence(flags, client.exchanges, findings);
   log(`\nEvidence written to ${file}`);
+
+  // Surface the verdict and fail the process on any violated invariant so a
+  // failed contract can never be mistaken for a GO by a caller/CI.
+  const failed = findings.filter((f) => f.status === "failed");
+  const answered = findings.filter((f) => f.status === "answered");
+  log(
+    `\n[verdict] ${answered.length} answered, ${failed.length} failed, ` +
+      `${findings.length - answered.length - failed.length} blocked.`,
+  );
+  if (failed.length > 0) {
+    for (const f of failed) log(`  FAILED — ${f.question}\n    ${f.note}`);
+    process.exitCode = 1;
+  }
 }
 
 main().catch((error) => {

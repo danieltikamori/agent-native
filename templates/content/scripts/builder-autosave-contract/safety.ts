@@ -2,13 +2,29 @@
  * Safety guards for the Builder autosave contract harness.
  *
  * NON-NEGOTIABLE: this harness may only ever create and mutate brand-new,
- * clearly-named throwaway entries that it created within the same run. It must
- * never touch pre-existing content. These guards enforce that at the code
- * level so a mistake throws instead of mutating real content.
+ * clearly-named throwaway entries that it created within the same run, in a
+ * model that is explicitly test-allowlisted. It must never touch pre-existing
+ * content and must never write into a production model. These guards enforce
+ * that at the code level so a mistake throws instead of mutating real content.
+ *
+ * This module is the TRUE single chokepoint: a mutating Builder call is
+ * impossible without a `MutableTarget` token, and the only way to obtain one is
+ * to go through `ThrowawayRegistry` (which validates the entry name) and a
+ * model that passed `assertModelAllowedForLive`. The client mutators in
+ * `builder-client.ts` accept a `MutableTarget`, never a bare string id — so the
+ * type system itself prevents writing to an unvetted target.
  */
 
 /** Every throwaway entry this harness creates carries this prefix in its name. */
 export const THROWAWAY_PREFIX = "zz-autosave-contract-test";
+
+/**
+ * A live write may only target a model whose name marks it as a test model:
+ * either it starts with `zz-` (the throwaway namespace) or it contains the
+ * literal `autosave-contract-test`. There is intentionally NO default
+ * production model and no way to write to an arbitrary model name.
+ */
+const TEST_MODEL_PATTERN = /^zz-|autosave-contract-test/;
 
 export interface RunFlags {
   /** Actually hit the Builder API. Without this, the harness only prints a plan. */
@@ -17,6 +33,13 @@ export interface RunFlags {
   allowUnpublishTest: boolean;
   /** Builder model to create the throwaway entry in (default: a test model). */
   model: string;
+  /**
+   * Explicit per-run allowlist of model names that may be written to even if
+   * they do not match the test-model pattern. Empty by default; populated only
+   * via `--allow-model <name>` (repeatable). This is a deliberate, auditable
+   * escape hatch — it still cannot name a model the operator did not type.
+   */
+  allowModels: string[];
 }
 
 export function parseFlags(argv: string[]): RunFlags {
@@ -30,19 +53,140 @@ export function parseFlags(argv: string[]): RunFlags {
     }
     return undefined;
   };
+  const valuesOf = (flag: string): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i];
+      if (a.startsWith(`${flag}=`)) {
+        out.push(a.slice(flag.length + 1));
+      } else if (a === flag && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+        out.push(argv[i + 1]);
+      }
+    }
+    return out.filter((v) => v.trim().length > 0);
+  };
   return {
     live: has("--live"),
     allowUnpublishTest: has("--allow-unpublish-test"),
     model: valueOf("--model") ?? "zz-autosave-contract-test-model",
+    allowModels: valuesOf("--allow-model"),
   };
 }
 
-/** A registry of entry IDs this run created. Only these may be mutated. */
+/** True if a model name looks like a dedicated test model (vs. production). */
+export function isTestModelName(model: string | undefined): boolean {
+  return typeof model === "string" && TEST_MODEL_PATTERN.test(model);
+}
+
+/**
+ * An opaque capability token proving a model passed the live-write gate. It is
+ * required to CREATE an entry (which has no id to vet yet). The private
+ * constructor means it can only be produced by `assertModelAllowedForLive`.
+ */
+export class MutableModel {
+  // NOTE: no TS "parameter properties" anywhere in this file — Node's
+  // --experimental-strip-types (strip-only) mode does not support them, and the
+  // harness runs under that flag. Declare fields explicitly and assign in body.
+  private readonly brand: typeof MUTABLE_MODEL_BRAND = MUTABLE_MODEL_BRAND;
+  readonly model: string;
+  private constructor(model: string) {
+    this.model = model;
+  }
+  static __mint(model: string): MutableModel {
+    return new MutableModel(model);
+  }
+  static is(value: unknown): value is MutableModel {
+    return value instanceof MutableModel && value.brand === MUTABLE_MODEL_BRAND;
+  }
+}
+
+const MUTABLE_MODEL_BRAND = Symbol("builder-autosave-contract/mutable-model");
+
+/**
+ * Gate live writes by model. A live run refuses to mutate unless the target
+ * model is either test-prefixed/test-named OR explicitly allowlisted via
+ * `--allow-model`. There is no default production model. Throws on refusal,
+ * otherwise returns a `MutableModel` token required by `createEntry`.
+ */
+export function assertModelAllowedForLive(
+  model: string,
+  allowModels: readonly string[],
+): MutableModel {
+  if (isTestModelName(model) || allowModels.includes(model)) {
+    return MutableModel.__mint(model);
+  }
+  throw new Error(
+    `SAFETY ABORT: refusing live writes into model ${JSON.stringify(model)} — ` +
+      `it is not a test model (name must start with "zz-" or contain ` +
+      `"autosave-contract-test") and was not passed via --allow-model. The ` +
+      `harness will not create or mutate entries in a production model.`,
+  );
+}
+
+/**
+ * An opaque capability token proving a given (model, entryId) pair was vetted
+ * by the registry: the entry was created by THIS run, its name carries the
+ * throwaway prefix, and its model passed the live-model gate.
+ *
+ * The constructor is `private`, so no code outside this module can build one —
+ * a caller cannot forge a token from a bare string id. The only way to obtain a
+ * `MutableTarget` is through `ThrowawayRegistry`, which mints one only after the
+ * name + model checks pass. Client mutators accept `MutableTarget`, never a
+ * bare id, so an unvetted write is unrepresentable. `MutableTarget.is` gives a
+ * runtime guard (defense in depth against plain objects coerced via `any`).
+ */
+export class MutableTarget {
+  private readonly brand: typeof MUTABLE_TARGET_BRAND = MUTABLE_TARGET_BRAND;
+  readonly model: string;
+  readonly entryId: string;
+  readonly name: string;
+  private constructor(model: string, entryId: string, name: string) {
+    this.model = model;
+    this.entryId = entryId;
+    this.name = name;
+  }
+
+  /** Module-internal mint path. Not exported; only the registry calls it. */
+  static __mint(model: string, entryId: string, name: string): MutableTarget {
+    return new MutableTarget(model, entryId, name);
+  }
+
+  /** Runtime check used by client mutators to reject forged/plain objects. */
+  static is(value: unknown): value is MutableTarget {
+    return (
+      value instanceof MutableTarget && value.brand === MUTABLE_TARGET_BRAND
+    );
+  }
+}
+
+const MUTABLE_TARGET_BRAND = Symbol("builder-autosave-contract/mutable-target");
+
+/**
+ * A registry of entries this run created. It is the ONLY source of
+ * `MutableTarget` tokens, and it only mints one after validating the entry name
+ * and the model gate. Holding a token is proof the write is safe.
+ */
 export class ThrowawayRegistry {
   private readonly ids = new Set<string>();
   private readonly names = new Map<string, string>();
+  private readonly models = new Map<string, string>();
+  private readonly allowModels: readonly string[];
 
-  register(id: string, name: string): void {
+  constructor(allowModels: readonly string[] = []) {
+    this.allowModels = allowModels;
+  }
+
+  register(target: MutableModel, id: string, name: string): MutableTarget {
+    // The MutableModel token proves the model already passed the live gate.
+    // Re-assert here as defense in depth (rejects a forged/plain object too).
+    if (!MutableModel.is(target)) {
+      throw new Error(
+        "SAFETY ABORT: register() requires a MutableModel issued by " +
+          "assertModelAllowedForLive — refusing to register from a bare value.",
+      );
+    }
+    const model = target.model;
+    assertModelAllowedForLive(model, this.allowModels);
     if (!isThrowawayName(name)) {
       throw new Error(
         `Refusing to register entry "${id}" — name ${JSON.stringify(
@@ -52,14 +196,17 @@ export class ThrowawayRegistry {
     }
     this.ids.add(id);
     this.names.set(id, name);
+    this.models.set(id, model);
+    return MutableTarget.__mint(model, id, name);
   }
 
   /**
-   * Assert an id is safe to mutate. Throws unless the id was created by THIS
-   * run AND its registered name carries the throwaway prefix. This is the
-   * single chokepoint every mutating call must pass through.
+   * Mint a `MutableTarget` for an id already registered by this run. Throws
+   * unless the id was created by THIS run AND its registered name carries the
+   * throwaway prefix AND the (re-checked) model passes the live gate. This is
+   * the single chokepoint every mutating call must pass through.
    */
-  assertMutable(id: string, operation: string): void {
+  assertMutable(id: string, operation: string): MutableTarget {
     if (!this.ids.has(id)) {
       throw new Error(
         `SAFETY ABORT: refusing ${operation} on entry "${id}" — it was not ` +
@@ -74,10 +221,17 @@ export class ThrowawayRegistry {
           `${JSON.stringify(name)} lacks the throwaway prefix.`,
       );
     }
+    const model = this.models.get(id) ?? "";
+    assertModelAllowedForLive(model, this.allowModels);
+    return MutableTarget.__mint(model, id, name);
   }
 
-  list(): { id: string; name: string }[] {
-    return [...this.ids].map((id) => ({ id, name: this.names.get(id) ?? "" }));
+  list(): { id: string; name: string; model: string }[] {
+    return [...this.ids].map((id) => ({
+      id,
+      name: this.names.get(id) ?? "",
+      model: this.models.get(id) ?? "",
+    }));
   }
 }
 

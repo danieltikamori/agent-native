@@ -45,7 +45,7 @@ node --experimental-strip-types scripts/builder-autosave-contract/run-contract.t
 node --env-file=<env-with-public-key> --experimental-strip-types \
   scripts/builder-autosave-contract/probe-readonly.ts --model blog-article
 
-# Full live contract run against YOUR throwaway entry (needs private key):
+# Full live contract run against YOUR throwaway entry (needs BOTH keys):
 node --env-file=.env.local --experimental-strip-types \
   scripts/builder-autosave-contract/run-contract.ts --live \
   --model zz-autosave-contract-test-model
@@ -56,10 +56,29 @@ node --env-file=.env.local --experimental-strip-types \
 
 Credentials (read from env, never hard-coded):
 `BUILDER_PRIVATE_KEY` / `BUILDER_CMS_PRIVATE_KEY` (write) and
-`BUILDER_API_KEY` / `BUILDER_PUBLIC_KEY` (public delivery).
+`BUILDER_API_KEY` / `BUILDER_PUBLIC_KEY` (public delivery). A `--live` run
+**requires both** — without the delivery key the harness cannot read delivered
+state to assert the invariants, so it refuses to run rather than emit an
+unverified GO.
 
-Raw captured request/response (private key + apiKey redacted) is written to
-`scripts/builder-autosave-contract/evidence/`.
+**Safety gates enforced in code (not convention):**
+
+- Live writes refuse any model that is not test-named (`zz-*` or containing
+  `autosave-contract-test`) unless it is explicitly passed via `--allow-model
+  <name>`. There is no default production model.
+- Mutating client calls (`createEntry`/`patchEntry`) require an opaque
+  capability token (`MutableModel` / `MutableTarget`) that only `safety.ts` can
+  mint — a bare model/id string is rejected at runtime. A write into unvetted
+  content is therefore unrepresentable, not merely discouraged.
+- The throwaway entry is created as a **draft** (`published:"draft"`), so even
+  the harness's own entry is never pushed live.
+
+Raw captured request/response is written to
+`scripts/builder-autosave-contract/evidence/`. Every persisted field flows
+through a single recursive redaction path that strips credential-looking query
+params (`apiKey`, `api_key`, `key`, `token`, `privateKey`, …) **anywhere** —
+including ones nested inside embedded URLs such as Builder pixel/preview URLs —
+and credential-looking object fields in request/response bodies and headers.
 
 ---
 
@@ -109,9 +128,12 @@ pending one live run).**
   with a `data`-only body (no `published` field), so it never asks Builder to
   change publish state.
 - **Remaining gap:** that the write call *itself* leaves `published` and the
-  delivered body byte-identical is confirmed by the harness's
-  `q1-baseline-live-delivery` vs `q1-live-delivery-after-autosave` diff — which
-  needs the gated live run. The harness asserts this automatically.
+  delivered marker unchanged still needs the gated live run. When it runs, the
+  harness **asserts** (it does not just capture): the autosave PATCH returns
+  HTTP ok, `published` is unchanged from the `q1-baseline-delivery` baseline,
+  and the delivered `data.marker` is unchanged. If any assertion fails the
+  finding is recorded as `failed` and the process exits nonzero — a violated
+  contract can never read as a GO.
 
 ### Q2 — Does it create Builder History autosaves? Trigger webhooks? Change `lastUpdated` / delivery-cache behavior?
 
@@ -119,8 +141,10 @@ pending one live run).**
 
 - **History autosaves:** Yes — Builder exposes `meta.hasAutosaves`, and we
   observed it `true` on a real published entry. `?autoSaveOnly=true` is the
-  documented mechanism that produces those autosave revisions. The harness
-  confirms the flag flips from `false`→`true` after the autosave PATCH.
+  documented mechanism that produces those autosave revisions. The live harness
+  **asserts** `meta.hasAutosaves === true` on the `includeUnpublished` re-read
+  after the autosave PATCH; a `false`/missing value is recorded as a `failed`
+  finding.
 - **Webhooks:** The adapter sends `triggerWebhooks=false`, so autosave writes
   suppress webhooks by design. The harness records the write response; webhook
   firing is observable only with a configured webhook sink (out of scope of a
@@ -136,15 +160,24 @@ pending one live run).**
 no safe throwaway entry was creatable and (b) the probe is destructive by
 construction. The harness runs it only with `--live --allow-unpublish-test`, and
 only against an entry it created this run whose name carries the
-`zz-autosave-contract-test` prefix.
+`zz-autosave-contract-test` prefix and whose model passed the live gate.
 
 Expected (and the reason this path is gated in production): the draft PATCH sets
-the entry's publish state to `draft`, **unpublishing the live artifact** —
-delivery without `includeUnpublished` would then return 0 results / 404 while
-the entry still exists under `includeUnpublished=true`. The production adapter
-gates this behind `metadata.allowDraftWrites === true` precisely because it can
-take live content down. The harness will quantify it (capture the
-before/after delivery diff) the moment a throwaway entry exists.
+the entry's publish state to `draft`, so published-only delivery returns 0
+results / 404 while the entry still exists under `includeUnpublished=true`. The
+harness **asserts** exactly that: the unpublish PATCH is HTTP ok and
+published-only delivery no longer returns the entry (`failed` otherwise). The
+production adapter gates this behind `metadata.allowDraftWrites === true`
+precisely because, against an already-*published* entry, it takes live content
+down.
+
+> **Caveat for the gated run:** because the harness now creates its throwaway
+> entry as a *draft* (so nothing is ever pushed live), this probe characterizes
+> the draft→delivery relationship rather than a true published→unpublished
+> transition. To exercise the destructive published→draft path explicitly, the
+> entry would first need to be published as a separate, equally-gated step. The
+> non-destructive draft baseline is the safer default; the published-transition
+> variant is left as an explicit opt-in if that exact transition must be proven.
 
 ### Q4 — Which response fields identify the live revision vs. an autosaved revision?
 
@@ -208,13 +241,17 @@ autosave is safe: it can toggle `hasAutosaves` without touching `published`.
 1. A Builder space that is **safe to write to** — ideally a dedicated test
    space, or explicit confirmation that creating a `zz-autosave-contract-test-*`
    model + entry in the existing space is acceptable.
-2. Its `BUILDER_PRIVATE_KEY` (write) + `BUILDER_API_KEY` (delivery) placed in
-   `templates/content/.env.local`.
+2. Its `BUILDER_PRIVATE_KEY` (write) **and** `BUILDER_API_KEY` (delivery) placed
+   in `templates/content/.env.local`. Both are required — `--live` refuses to
+   run without the delivery key, since it cannot otherwise assert the contract.
 3. Run `… run-contract.ts --live` (and `--allow-unpublish-test` for Q3). The
-   harness creates + publishes its own throwaway entry, runs the autosave +
-   (gated) unpublish probes against *only* that entry, captures raw evidence to
-   `evidence/`, and prints the created entry IDs for manual cleanup.
+   model must be test-named (`zz-*`) or passed via `--allow-model`. The harness
+   creates its own throwaway entry **as a draft**, runs the autosave + (gated)
+   unpublish probes against *only* that entry, asserts the invariants, captures
+   raw evidence to `evidence/`, and prints the created entry IDs for cleanup.
 
-When that runs clean — autosave PATCH flips `hasAutosaves`→`true` while the
-live delivery body and `published` stay unchanged — this becomes an
-unconditional **GO** to treat `autoSaveOnly` as the canonical safe write mode.
+When that runs clean — the run exits 0 with every finding `answered` because
+the autosave PATCH flipped `meta.hasAutosaves`→`true` while `published` and the
+delivered marker stayed unchanged — this becomes an unconditional **GO** to
+treat `autoSaveOnly` as the canonical safe write mode. If any invariant is
+violated the run exits nonzero with a `failed` finding and remains **NO-GO**.

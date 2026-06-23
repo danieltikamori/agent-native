@@ -17,6 +17,8 @@
  * findings doc is built from — not documentation.
  */
 
+import { MutableModel, MutableTarget } from "./safety.ts";
+
 export interface CapturedExchange {
   label: string;
   request: {
@@ -43,14 +45,38 @@ export interface BuilderClientConfig {
   cdnHost: string;
 }
 
-const SENSITIVE_QUERY_KEYS = new Set(["apiKey", "key"]);
+/**
+ * Matches any field/param NAME that may carry a credential. Case-insensitive,
+ * substring match so e.g. `privateKey`, `BUILDER_API_KEY`, `x-api-key`,
+ * `accessToken`, `authorization` are all caught. This is the single rule both
+ * URL-query redaction and body redaction use.
+ */
+const SENSITIVE_NAME_PATTERN =
+  /(api[-_ ]?key|^key$|[-_]key$|^token$|[-_]?token$|secret|password|passwd|private[-_ ]?key|bearer|authorization|auth$|credential)/i;
 
+const REDACTED = "<REDACTED>";
+
+export function isSensitiveName(name: string): boolean {
+  return SENSITIVE_NAME_PATTERN.test(name);
+}
+
+/**
+ * Redact credential-looking query params anywhere in a URL (including nested
+ * URLs embedded as query values, e.g. Builder pixel/preview `previewUrl`s that
+ * carry an `apiKey`). Recurses into embedded URL strings.
+ */
 export function redactUrl(rawUrl: string): string {
   try {
     const url = new URL(rawUrl);
-    for (const key of url.searchParams.keys()) {
-      if (SENSITIVE_QUERY_KEYS.has(key)) {
-        url.searchParams.set(key, "<REDACTED>");
+    for (const key of [...url.searchParams.keys()]) {
+      if (isSensitiveName(key)) {
+        url.searchParams.set(key, REDACTED);
+      } else {
+        // A param value may itself be (or contain) a URL with a nested apiKey.
+        const value = url.searchParams.get(key);
+        if (value && looksLikeUrl(value)) {
+          url.searchParams.set(key, redactUrl(value));
+        }
       }
     }
     return url.toString();
@@ -59,12 +85,46 @@ export function redactUrl(rawUrl: string): string {
   }
 }
 
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value) || value.includes("apiKey=") || value.includes("api_key=");
+}
+
+/**
+ * Recursively redact a value before it is persisted as evidence. Strips:
+ *  - object fields whose KEY looks like a credential (replaced with <REDACTED>),
+ *  - any string VALUE that is/contains a URL with a credential query param.
+ * This is the SINGLE path all persisted evidence flows through (request bodies,
+ * response bodies, and any string that might smuggle an apiKey in a URL).
+ */
+export function redactDeep(value: unknown): unknown {
+  if (typeof value === "string") {
+    return looksLikeUrl(value) ? redactUrl(value) : value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => redactDeep(v));
+  }
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = isSensitiveName(key) ? REDACTED : redactDeep(v);
+    }
+    return out;
+  }
+  return value;
+}
+
 function redactHeaders(
   headers: Record<string, string>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    out[key] = key.toLowerCase() === "authorization" ? "Bearer <REDACTED>" : value;
+    if (key.toLowerCase() === "authorization") {
+      out[key] = "Bearer <REDACTED>";
+    } else if (isSensitiveName(key)) {
+      out[key] = REDACTED;
+    } else {
+      out[key] = value;
+    }
   }
   return out;
 }
@@ -137,20 +197,23 @@ export class BuilderContractClient {
     }
     const response = await fetch(args.url, init);
     const text = await response.text();
+    // Every persisted field flows through redactDeep — the single redaction
+    // chokepoint — so a credential cannot reach evidence via a body field or a
+    // URL smuggled inside a response (e.g. previewUrl/pixel apiKey).
     const exchange: CapturedExchange = {
       label: args.label,
       request: {
         method: args.method,
         url: redactUrl(args.url),
         headers: redactHeaders(args.headers),
-        body: args.body ?? null,
+        body: redactDeep(args.body ?? null),
       },
       response: {
         ok: response.ok,
         status: response.status,
         statusText: response.statusText,
-        headers: responseHeadersToObject(response.headers),
-        body: parseBody(text),
+        headers: redactHeaders(responseHeadersToObject(response.headers)),
+        body: redactDeep(parseBody(text)),
       },
       durationMs: Date.now() - startedAt,
       capturedAt: new Date(startedAt).toISOString(),
@@ -169,13 +232,27 @@ export class BuilderContractClient {
     };
   }
 
-  /** POST /api/v1/write/{model} — create a new entry. */
+  /**
+   * POST /api/v1/write/{model} — create a new entry.
+   *
+   * Requires a `MutableModel` capability token, which can only be obtained from
+   * `assertModelAllowedForLive` in safety.ts. A bare model string is NOT
+   * accepted, so a create into a production model is impossible without the
+   * model passing the live gate first.
+   */
   async createEntry(args: {
     label: string;
-    model: string;
+    target: MutableModel;
     body: Record<string, unknown>;
   }): Promise<CapturedExchange> {
-    const url = `${this.config.writeHost}/api/v1/write/${encodeURIComponent(args.model)}`;
+    if (!MutableModel.is(args.target)) {
+      throw new Error(
+        "SAFETY ABORT: createEntry requires a MutableModel token from " +
+          "assertModelAllowedForLive — refusing to write from a bare model id.",
+      );
+    }
+    const model = args.target.model;
+    const url = `${this.config.writeHost}/api/v1/write/${encodeURIComponent(model)}`;
     return this.capture({
       label: args.label,
       method: "POST",
@@ -193,13 +270,19 @@ export class BuilderContractClient {
    */
   async patchEntry(args: {
     label: string;
-    model: string;
-    entryId: string;
+    target: MutableTarget;
     query?: Record<string, string>;
     body: Record<string, unknown>;
   }): Promise<CapturedExchange> {
+    if (!MutableTarget.is(args.target)) {
+      throw new Error(
+        "SAFETY ABORT: patchEntry requires a MutableTarget token from the " +
+          "ThrowawayRegistry — refusing to mutate from a bare entry id.",
+      );
+    }
+    const { model, entryId } = args.target;
     const url = new URL(
-      `${this.config.writeHost}/api/v1/write/${encodeURIComponent(args.model)}/${encodeURIComponent(args.entryId)}`,
+      `${this.config.writeHost}/api/v1/write/${encodeURIComponent(model)}/${encodeURIComponent(entryId)}`,
     );
     for (const [k, v] of Object.entries(args.query ?? {})) {
       url.searchParams.set(k, v);
