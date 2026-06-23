@@ -1,0 +1,3 @@
+# Raw captured API responses can contain real entry content. Do not commit.
+*.json
+!.gitkeep
