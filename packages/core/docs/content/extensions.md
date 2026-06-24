@@ -192,11 +192,11 @@ Three rules of thumb:
 The same store is also available through authenticated framework routes when
 another logged-in client needs to read or update the data an extension uses:
 
-| Method   | Path                                                                 | Role required                 |
-| -------- | -------------------------------------------------------------------- | ----------------------------- |
-| `GET`    | `/_agent-native/extensions/data/:extensionId/:collection`            | viewer                        |
-| `POST`   | `/_agent-native/extensions/data/:extensionId/:collection`            | editor, admin, or owner       |
-| `DELETE` | `/_agent-native/extensions/data/:extensionId/:collection/:itemId`    | editor, admin, or owner       |
+| Method   | Path                                                              | Role required           |
+| -------- | ----------------------------------------------------------------- | ----------------------- |
+| `GET`    | `/_agent-native/extensions/data/:extensionId/:collection`         | viewer                  |
+| `POST`   | `/_agent-native/extensions/data/:extensionId/:collection`         | editor, admin, or owner |
+| `DELETE` | `/_agent-native/extensions/data/:extensionId/:collection/:itemId` | editor, admin, or owner |
 
 Use `?scope=user`, `?scope=org`, or `?scope=all` on reads. Writes accept JSON
 like `{ "id": "item-1", "scope": "org", "data": { "title": "Team note" } }`.

@@ -270,18 +270,18 @@ set-url-path({ "pathname": "/extensions/EXTENSION_ID" })
 
 ## Routes
 
-| Method | Path                                   | Purpose                                       |
-| ------ | -------------------------------------- | --------------------------------------------- |
-| GET    | `/_agent-native/extensions`            | List extensions (filtered by ownership/share) |
-| POST   | `/_agent-native/extensions`            | Create an extension                           |
-| GET    | `/_agent-native/extensions/:id`        | Get an extension                              |
-| PUT    | `/_agent-native/extensions/:id`        | Update (supports `patches` for diffing)       |
-| DELETE | `/_agent-native/extensions/:id`        | Delete an extension                           |
-| GET    | `/_agent-native/extensions/:id/render` | Render HTML for iframe                        |
-| POST   | `/_agent-native/extensions/proxy`      | Authenticated proxy with secret injection     |
-| GET    | `/_agent-native/extensions/data/:id/:collection` | List authenticated extension data    |
-| POST   | `/_agent-native/extensions/data/:id/:collection` | Upsert authenticated extension data  |
-| DELETE | `/_agent-native/extensions/data/:id/:collection/:itemId` | Delete authenticated extension data |
+| Method | Path                                                     | Purpose                                       |
+| ------ | -------------------------------------------------------- | --------------------------------------------- |
+| GET    | `/_agent-native/extensions`                              | List extensions (filtered by ownership/share) |
+| POST   | `/_agent-native/extensions`                              | Create an extension                           |
+| GET    | `/_agent-native/extensions/:id`                          | Get an extension                              |
+| PUT    | `/_agent-native/extensions/:id`                          | Update (supports `patches` for diffing)       |
+| DELETE | `/_agent-native/extensions/:id`                          | Delete an extension                           |
+| GET    | `/_agent-native/extensions/:id/render`                   | Render HTML for iframe                        |
+| POST   | `/_agent-native/extensions/proxy`                        | Authenticated proxy with secret injection     |
+| GET    | `/_agent-native/extensions/data/:id/:collection`         | List authenticated extension data             |
+| POST   | `/_agent-native/extensions/data/:id/:collection`         | Upsert authenticated extension data           |
+| DELETE | `/_agent-native/extensions/data/:id/:collection/:itemId` | Delete authenticated extension data           |
 
 ## Database & API names — back-compat reference
 
