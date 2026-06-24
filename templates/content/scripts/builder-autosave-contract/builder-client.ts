@@ -86,7 +86,11 @@ export function redactUrl(rawUrl: string): string {
 }
 
 function looksLikeUrl(value: string): boolean {
-  return /^https?:\/\//i.test(value) || value.includes("apiKey=") || value.includes("api_key=");
+  return (
+    /^https?:\/\//i.test(value) ||
+    value.includes("apiKey=") ||
+    value.includes("api_key=")
+  );
 }
 
 /**
@@ -319,7 +323,8 @@ export class BuilderContractClient {
       `${this.config.cdnHost}/api/v3/content/${encodeURIComponent(args.model)}/${encodeURIComponent(args.entryId)}`,
     );
     url.searchParams.set("apiKey", this.config.publicKey ?? "");
-    if (args.includeUnpublished) url.searchParams.set("includeUnpublished", "true");
+    if (args.includeUnpublished)
+      url.searchParams.set("includeUnpublished", "true");
     if (args.cachebust) url.searchParams.set("cachebust", String(Date.now()));
     return this.#capture({
       label: args.label,
@@ -344,8 +349,10 @@ export class BuilderContractClient {
       `${this.config.cdnHost}/api/v3/content/${encodeURIComponent(args.model)}`,
     );
     url.searchParams.set("apiKey", this.config.publicKey ?? "");
-    if (args.includeUnpublished) url.searchParams.set("includeUnpublished", "true");
-    if (typeof args.limit === "number") url.searchParams.set("limit", String(args.limit));
+    if (args.includeUnpublished)
+      url.searchParams.set("includeUnpublished", "true");
+    if (typeof args.limit === "number")
+      url.searchParams.set("limit", String(args.limit));
     url.searchParams.set("cachebust", String(Date.now()));
     for (const [k, v] of Object.entries(args.query ?? {})) {
       url.searchParams.set(k, v);

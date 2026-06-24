@@ -34,7 +34,10 @@ async function main(): Promise<void> {
   const model = valueOf(argv, "--model", "blog-article");
   const config = resolveConfig();
   // Hard guarantee: never even hold the private key in this probe.
-  const client = new BuilderContractClient({ ...config, privateKey: undefined });
+  const client = new BuilderContractClient({
+    ...config,
+    privateKey: undefined,
+  });
 
   if (!client.hasReadCredentials()) {
     process.stdout.write(
@@ -81,7 +84,11 @@ async function main(): Promise<void> {
   writeFileSync(
     file,
     JSON.stringify(
-      { capturedAt: new Date().toISOString(), model, exchanges: client.exchanges },
+      {
+        capturedAt: new Date().toISOString(),
+        model,
+        exchanges: client.exchanges,
+      },
       null,
       2,
     ),
@@ -90,6 +97,8 @@ async function main(): Promise<void> {
 }
 
 main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  process.stderr.write(
+    `${error instanceof Error ? error.stack : String(error)}\n`,
+  );
   process.exitCode = 1;
 });

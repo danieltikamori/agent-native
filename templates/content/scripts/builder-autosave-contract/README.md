@@ -62,10 +62,10 @@ node --env-file=.env.local --experimental-strip-types \
 
 ## Credentials (env, never hard-coded)
 
-| var | purpose |
-| --- | --- |
-| `BUILDER_PRIVATE_KEY` / `BUILDER_CMS_PRIVATE_KEY` | write API bearer token |
-| `BUILDER_API_KEY` / `BUILDER_PUBLIC_KEY` | public delivery `apiKey` |
+| var                                               | purpose                  |
+| ------------------------------------------------- | ------------------------ |
+| `BUILDER_PRIVATE_KEY` / `BUILDER_CMS_PRIVATE_KEY` | write API bearer token   |
+| `BUILDER_API_KEY` / `BUILDER_PUBLIC_KEY`          | public delivery `apiKey` |
 
 ## Safety rules baked in
 

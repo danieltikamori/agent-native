@@ -59,7 +59,11 @@ export function parseFlags(argv: string[]): RunFlags {
       const a = argv[i];
       if (a.startsWith(`${flag}=`)) {
         out.push(a.slice(flag.length + 1));
-      } else if (a === flag && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+      } else if (
+        a === flag &&
+        i + 1 < argv.length &&
+        !argv[i + 1].startsWith("--")
+      ) {
         out.push(argv[i + 1]);
       }
     }
@@ -119,9 +123,7 @@ export class MutableModel {
     Object.freeze(this);
   }
   static is(value: unknown): value is MutableModel {
-    return (
-      typeof value === "object" && value !== null && #authentic in value
-    );
+    return typeof value === "object" && value !== null && #authentic in value;
   }
 }
 
@@ -191,9 +193,7 @@ export class MutableTarget {
 
   /** Runtime check used by client mutators to reject forged/plain objects. */
   static is(value: unknown): value is MutableTarget {
-    return (
-      typeof value === "object" && value !== null && #authentic in value
-    );
+    return typeof value === "object" && value !== null && #authentic in value;
   }
 }
 

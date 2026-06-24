@@ -62,9 +62,9 @@ describe("token minting surface is closed (no public bypass)", () => {
   it("refuses direct construction without the module-private mint key", () => {
     // A caller cannot forge a valid token by constructing one directly with an
     // arbitrary symbol — the only minters live inside safety.ts.
-    expect(
-      () => new MutableModel(Symbol("attacker"), "blog-article"),
-    ).toThrow(/SAFETY ABORT/);
+    expect(() => new MutableModel(Symbol("attacker"), "blog-article")).toThrow(
+      /SAFETY ABORT/,
+    );
     expect(
       () => new MutableTarget(Symbol("attacker"), "blog-article", "id", "name"),
     ).toThrow(/SAFETY ABORT/);
@@ -247,9 +247,7 @@ describe("redaction (single evidence chokepoint)", () => {
         privateKey: "ALSO_GONE",
       },
       data: { title: "fine" },
-      results: [
-        { previewUrl: "https://x.io/p?apiKey=ARRAYSECRET", ok: true },
-      ],
+      results: [{ previewUrl: "https://x.io/p?apiKey=ARRAYSECRET", ok: true }],
     };
     const out = JSON.stringify(redactDeep(body));
     expect(out).not.toContain("SHOULD_BE_GONE");
