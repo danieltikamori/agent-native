@@ -177,11 +177,16 @@ export function getOnboardingHtml(opts: OnboardingHtmlOptions = {}): string {
     aria-describedby="google-preflight-copy"
     tabindex="-1"
   >
-    <div class="google-preflight-heading">
-      <p class="google-preflight-title" id="google-preflight-title">${esc(googleSignInNotice.title)}</p>
-      <button type="button" class="google-preflight-close" aria-label="Close Google sign-in choices" onclick="__anHideGoogleNotice()">&times;</button>
-    </div>
+    <button type="button" class="google-preflight-close" aria-label="Close Google sign-in choices" onclick="__anHideGoogleNotice()">&times;</button>
+    <div class="google-preflight-main">
+      <span class="google-preflight-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.24 3.957l-8.422 14.06a1.989 1.989 0 0 0 1.7 2.983h16.845a1.989 1.989 0 0 0 1.7 -2.983l-8.423 -14.06a1.989 1.989 0 0 0 -3.4 0z"/><path d="M12 9v4"/><path d="M12 16h.01"/></svg>
+      </span>
+      <div class="google-preflight-text">
+        <p class="google-preflight-title" id="google-preflight-title">${esc(googleSignInNotice.title)}</p>
 ${googleNoticeBodyHtml}
+      </div>
+    </div>
     <div class="google-preflight-actions">
       <button type="button" class="btn-primary" id="google-preflight-continue" onclick="__anAcceptGoogleNotice()">${esc(googleSignInNotice.continueLabel ?? "Continue")}</button>
 ${googleNoticeRunLocalHtml}
@@ -707,6 +712,19 @@ ${
     cursor: pointer;
   }
   .btn-secondary:hover { color: #bbb; border-color: rgba(255,255,255,0.2); }
+  .legal-note {
+    margin-top: 0.625rem;
+    color: #666;
+    font-size: 0.6875rem;
+    line-height: 1.45;
+    text-align: center;
+  }
+  .legal-note a {
+    color: #777;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .legal-note a:hover { color: #aaa; }
   .msg { margin-top: 0.75rem; font-size: 0.8125rem; display: none; }
   .msg.error { color: #f87171; }
   .msg.success { color: #33C4FF; }
@@ -898,25 +916,40 @@ ${
     border-left: 1px solid rgba(255,255,255,0.12);
     border-top: 1px solid rgba(255,255,255,0.12);
   }
-  .google-preflight-heading {
+  .google-preflight-main {
     display: flex;
     align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.75rem;
-    margin-bottom: 0.375rem;
+    gap: 0.625rem;
+    padding-right: 1.25rem;
   }
+  .google-preflight-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 7px;
+    background: rgba(245,158,11,0.15);
+    color: #fcd34d;
+  }
+  .google-preflight-icon svg { width: 1rem; height: 1rem; }
+  .google-preflight-text { min-width: 0; }
   .google-preflight-title {
     color: #fff;
     font-size: 0.8125rem;
     font-weight: 600;
+    margin-bottom: 0.25rem;
   }
   .google-preflight-close {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     width: 1.5rem;
     height: 1.5rem;
-    margin: -0.25rem -0.25rem 0 0;
     background: transparent;
     border: none;
     border-radius: 999px;
@@ -942,6 +975,7 @@ ${
     flex: 1;
     width: auto;
     margin-top: 0;
+    white-space: nowrap;
   }
   .google-preflight-command {
     margin-top: 0.75rem;
@@ -1039,6 +1073,7 @@ ${
     <label for="s-pass2">Confirm password</label>
     <input id="s-pass2" type="password" autocomplete="new-password" placeholder="Confirm password" required minlength="8" />
       <button type="submit">Create account</button>
+      <p class="legal-note">By signing up, you accept our <a href="https://www.agent-native.com/terms" target="_blank" rel="noreferrer">Terms</a> and <a href="https://www.agent-native.com/privacy" target="_blank" rel="noreferrer">Privacy Policy</a>.</p>
       <p class="msg" id="s-msg"></p>
     </form>
 

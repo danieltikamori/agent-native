@@ -50,21 +50,20 @@ Build the latest Chrome Web Store ZIP from the repo root:
 pnpm --filter clips-chrome-extension package
 ```
 
-Upload the generated artifact:
+Upload the generated artifact (the version matches `public/manifest.json`; the
+Chrome Web Store requires each upload to use a higher version than the last):
 
 ```txt
-templates/clips/chrome-extension/releases/clips-chrome-extension-0.1.0.zip
+templates/clips/chrome-extension/releases/clips-chrome-extension-0.1.1.zip
 ```
 
 ## Web App Rollout Gate
 
-Keep the web app's Chrome extension UI hidden until the Web Store listing is
-approved and there is a stable public URL.
+The Web Store listing is live, so the web app shows the Chrome extension option
+by default — no env var needed.
 
-- `VITE_CLIPS_CHROME_EXTENSION_ENABLED=1` reveals the Chrome option beside
-  Clips desktop prompts.
+- `VITE_CLIPS_CHROME_EXTENSION_ENABLED=0` (or `false`/`no`/`off`) hides the
+  Chrome option again, e.g. a deployment that only ships the desktop app.
 - `VITE_CLIPS_CHROME_EXTENSION_URL` overrides the default install URL
   (`https://chromewebstore.google.com/detail/baoipacpchggcdigagnajakiidcgcffn`)
   if a deployment uses a different listing.
-- Leave both unset while submitting the draft so production continues to send
-  users directly to the desktop app.

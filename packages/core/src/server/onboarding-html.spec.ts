@@ -131,6 +131,18 @@ describe("getOnboardingHtml", () => {
     expect(html).toContain("password: document.getElementById('l-pass').value");
   });
 
+  it("shows a secondary terms and privacy notice on email signup", () => {
+    const html = getOnboardingHtml();
+
+    expect(html).toContain(
+      'By signing up, you accept our <a href="https://www.agent-native.com/terms"',
+    );
+    expect(html).toContain(
+      '<a href="https://www.agent-native.com/privacy" target="_blank" rel="noreferrer">Privacy Policy</a>',
+    );
+    expect(html).toContain(".legal-note");
+  });
+
   it("normalizes sign-in return targets before redirect and preserves hashes", () => {
     const html = getOnboardingHtml();
 
