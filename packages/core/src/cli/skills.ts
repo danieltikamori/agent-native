@@ -3678,11 +3678,7 @@ function workspaceCorePackageName(
 function hasAgentNativeCoreDependency(
   pkg: Record<string, unknown> | undefined,
 ): boolean {
-  for (const field of [
-    "dependencies",
-    "devDependencies",
-    "peerDependencies",
-  ]) {
+  for (const field of ["dependencies", "devDependencies", "peerDependencies"]) {
     const deps = pkg?.[field];
     if (
       deps &&
@@ -3784,11 +3780,17 @@ function skillDirContentsMatch(sourceDir: string, targetDir: string): boolean {
   return expectedFiles.every((file) => expected[file] === actual[file]);
 }
 
-function scaffoldGuidanceCurrent(sourceRoot: string, targetRoot: string): boolean {
+function scaffoldGuidanceCurrent(
+  sourceRoot: string,
+  targetRoot: string,
+): boolean {
   const skills = listImmediateSkillDirs(sourceRoot);
   if (skills.length === 0) return false;
   return skills.every((skill) =>
-    skillDirContentsMatch(path.join(sourceRoot, skill), path.join(targetRoot, skill)),
+    skillDirContentsMatch(
+      path.join(sourceRoot, skill),
+      path.join(targetRoot, skill),
+    ),
   );
 }
 
@@ -3844,7 +3846,10 @@ function collectScaffoldGuidanceStates(
   ];
 }
 
-function copyScaffoldGuidanceSkills(sourceRoot: string, targetRoot: string): void {
+function copyScaffoldGuidanceSkills(
+  sourceRoot: string,
+  targetRoot: string,
+): void {
   fs.mkdirSync(targetRoot, { recursive: true });
   for (const skill of listImmediateSkillDirs(sourceRoot)) {
     const targetSkillDir = path.join(targetRoot, skill);
@@ -3921,7 +3926,10 @@ function repairScaffoldAgentLinks(states: ScaffoldGuidanceState[]): void {
       const key = `workspace:${state.workspaceRoot}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      ensureWorkspaceRootSkillsLink(state.workspaceRoot, state.sharedPackageDir);
+      ensureWorkspaceRootSkillsLink(
+        state.workspaceRoot,
+        state.sharedPackageDir,
+      );
       setupAgentSymlinks(state.workspaceRoot);
       setupAgentSymlinks(state.sharedPackageDir);
       const appsDir = path.join(state.workspaceRoot, "apps");
@@ -5777,6 +5785,27 @@ function formatSkillState(state: SkillInstallState): string {
   return `${state.skillName.padEnd(22)} ${status.padEnd(7)} ${state.scope}/${state.client} ${managed}${hashes}\n  ${state.path}`;
 }
 
+function scaffoldStateJson(state: ScaffoldGuidanceState) {
+  return {
+    kind: state.kind,
+    displayName: state.displayName,
+    templateName: state.templateName,
+    path: state.path,
+    sourcePath: state.sourcePath,
+    projectRoot: state.projectRoot,
+    workspaceRoot: state.workspaceRoot,
+    sharedPackageDir: state.sharedPackageDir,
+    skillCount: state.skillCount,
+    status: state.current ? "current" : "stale",
+    managed: true,
+  };
+}
+
+function formatScaffoldState(state: ScaffoldGuidanceState): string {
+  const status = state.current ? "current" : "stale";
+  return `${"scaffold".padEnd(22)} ${status.padEnd(7)} project/${state.kind} managed (${state.skillCount} skills)\n  ${state.path}`;
+}
+
 function planModeSummary(mode: PlanInstallMode): string {
   if (mode === "local-files")
     return "Local files - no hosted writes by default";
@@ -5857,25 +5886,46 @@ function runSkillsStatusOrUpdate(
   options: RunSkillsOptions,
   update: boolean,
 ): void {
-  const before = collectSkillInstallStates(parsed, options);
-  const changed = update ? updateSkillInstallStates(before, parsed.dryRun) : [];
-  const after =
+  const skillBefore = collectSkillInstallStates(parsed, options);
+  const scaffoldBefore = collectScaffoldGuidanceStates(parsed, options);
+  const skillChanged = update
+    ? updateSkillInstallStates(skillBefore, parsed.dryRun)
+    : [];
+  const scaffoldChanged = update
+    ? updateScaffoldGuidanceStates(scaffoldBefore, parsed.dryRun)
+    : [];
+  if (update && !parsed.dryRun && scaffoldChanged.length > 0) {
+    repairScaffoldAgentLinks(scaffoldChanged);
+  }
+  const skillAfter =
     update && !parsed.dryRun
       ? collectSkillInstallStates(parsed, options)
-      : before;
+      : skillBefore;
+  const scaffoldAfter =
+    update && !parsed.dryRun
+      ? collectScaffoldGuidanceStates(parsed, options)
+      : scaffoldBefore;
+  const beforeCount = skillBefore.length + scaffoldBefore.length;
+  const changedCount = skillChanged.length + scaffoldChanged.length;
 
   if (parsed.printJson) {
-    const outputStates = update && !parsed.dryRun ? after : before;
+    const outputSkillStates =
+      update && !parsed.dryRun ? skillAfter : skillBefore;
+    const outputScaffoldStates =
+      update && !parsed.dryRun ? scaffoldAfter : scaffoldBefore;
     process.stdout.write(
       `${JSON.stringify(
         {
           ok: true,
           command: parsed.command,
           dryRun: parsed.dryRun,
-          found: before.length,
-          stale: outputStates.filter((state) => !state.current).length,
-          updated: changed.length,
-          skills: outputStates.map(skillStateJson),
+          found: beforeCount,
+          stale:
+            outputSkillStates.filter((state) => !state.current).length +
+            outputScaffoldStates.filter((state) => !state.current).length,
+          updated: changedCount,
+          skills: outputSkillStates.map(skillStateJson),
+          scaffold: outputScaffoldStates.map(scaffoldStateJson),
         },
         null,
         2,
@@ -5884,10 +5934,13 @@ function runSkillsStatusOrUpdate(
     return;
   }
 
-  if (before.length === 0) {
+  if (beforeCount === 0) {
     const target = parsed.target ? ` for ${parsed.target}` : "";
+    const hint = isScaffoldGuidanceTarget(parsed.target)
+      ? `Run this from a generated Agent Native app or workspace root.\n`
+      : `Run "npx @agent-native/core@latest skills add ${parsed.target ?? "visual-plan"}" to install one.\n`;
     process.stdout.write(
-      `No installed Agent Native skill copies found${target}.\nRun "npx @agent-native/core@latest skills add ${parsed.target ?? "visual-plan"}" to install one.\n`,
+      `No installed Agent Native skill copies found${target}.\n${hint}`,
     );
     return;
   }
@@ -5895,20 +5948,27 @@ function runSkillsStatusOrUpdate(
   if (update) {
     if (parsed.dryRun) {
       process.stdout.write(
-        changed.length
-          ? `Would update ${changed.length} skill folder${changed.length === 1 ? "" : "s"}:\n`
+        changedCount
+          ? `Would update ${changedCount} skill folder${changedCount === 1 ? "" : "s"}:\n`
           : "All discovered skill folders are already current.\n",
       );
     } else {
       process.stdout.write(
-        changed.length
-          ? `Updated ${changed.length} skill folder${changed.length === 1 ? "" : "s"}.\n`
+        changedCount
+          ? `Updated ${changedCount} skill folder${changedCount === 1 ? "" : "s"}.\n`
           : "All discovered skill folders are already current.\n",
       );
     }
   }
 
-  const rows = (update && parsed.dryRun ? before : after).map(formatSkillState);
+  const rows = [
+    ...(update && parsed.dryRun ? skillBefore : skillAfter).map(
+      formatSkillState,
+    ),
+    ...(update && parsed.dryRun ? scaffoldBefore : scaffoldAfter).map(
+      formatScaffoldState,
+    ),
+  ];
   process.stdout.write(`${rows.join("\n")}\n`);
 }
 

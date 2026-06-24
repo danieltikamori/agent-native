@@ -402,6 +402,53 @@ const ENTRIES: FirstPartyMetric[] = [
     },
   },
   {
+    key: "top-visited-urls",
+    title: "Top Visited URLs",
+    chartType: "table",
+    source: "first-party",
+    width: 2,
+    windowed: false,
+    buildSql: fixed(
+      `WITH pageviews AS (SELECT COALESCE(CASE WHEN NULLIF(hostname, '') IS NOT NULL THEN 'https://' || hostname || COALESCE(NULLIF(path, ''), '/') END, NULLIF(url, ''), NULLIF(path, ''), 'unknown') AS url, CASE WHEN NULLIF(hostname, '') IS NOT NULL THEN 'https://' || hostname || COALESCE(NULLIF(path, ''), '/') WHEN NULLIF(url, '') LIKE 'http%' THEN url ELSE COALESCE(NULLIF(url, ''), NULLIF(path, ''), '') END AS href, COUNT(*) AS views, COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), NULLIF(anonymous_id, ''))) AS users, MAX(substr(timestamp, 1, 10)) AS last_seen FROM analytics_events WHERE event_name = 'pageview' AND ${DASHBOARD_TIME_RANGE_FILTER} AND ${DASHBOARD_EMAIL_FILTER} GROUP BY 1, 2) SELECT url, views, users, last_seen, href FROM pageviews ORDER BY views DESC LIMIT 25`,
+    ),
+    config: {
+      description:
+        "Most-viewed URLs in the selected time range. Links open in a new tab.",
+      sortable: true,
+      limit: 25,
+      columns: [
+        { key: "url", label: "URL", format: "link", linkKey: "href" },
+        { key: "views", label: "Views", format: "number" },
+        { key: "users", label: "Users", format: "number" },
+        { key: "last_seen", label: "Last seen", format: "date" },
+        { key: "href", hidden: true },
+      ],
+    },
+  },
+  {
+    key: "top-visited-clips",
+    title: "Top Visited Clips",
+    chartType: "table",
+    source: "first-party",
+    width: 2,
+    windowed: false,
+    buildSql: fixed(
+      `WITH clip_views AS (SELECT COALESCE(CASE WHEN NULLIF(hostname, '') IS NOT NULL THEN 'https://' || hostname || COALESCE(NULLIF(path, ''), '/') END, NULLIF(url, ''), NULLIF(path, ''), 'unknown') AS clip, CASE WHEN NULLIF(hostname, '') IS NOT NULL THEN 'https://' || hostname || COALESCE(NULLIF(path, ''), '/') WHEN NULLIF(url, '') LIKE 'http%' THEN url ELSE COALESCE(NULLIF(url, ''), NULLIF(path, ''), '') END AS href, COUNT(*) AS views, COUNT(DISTINCT COALESCE(NULLIF(user_id, ''), NULLIF(anonymous_id, ''))) AS users, MAX(substr(timestamp, 1, 10)) AS last_seen FROM analytics_events WHERE event_name = 'pageview' AND ${DASHBOARD_TIME_RANGE_FILTER} AND ${DASHBOARD_EMAIL_FILTER} AND lower(COALESCE(hostname, '')) = 'clips.agent-native.com' AND COALESCE(path, '') LIKE '/share/%' GROUP BY 1, 2) SELECT clip, views, users, last_seen, href FROM clip_views ORDER BY views DESC LIMIT 25`,
+    ),
+    config: {
+      description: "Most-viewed shared Clips pages in the selected time range.",
+      sortable: true,
+      limit: 25,
+      columns: [
+        { key: "clip", label: "Clip URL", format: "link", linkKey: "href" },
+        { key: "views", label: "Views", format: "number" },
+        { key: "users", label: "Users", format: "number" },
+        { key: "last_seen", label: "Last seen", format: "date" },
+        { key: "href", hidden: true },
+      ],
+    },
+  },
+  {
     key: "repeat-users",
     title: "Repeat Users",
     chartType: "metric",

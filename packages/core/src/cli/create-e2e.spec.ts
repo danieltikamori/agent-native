@@ -887,6 +887,18 @@ describe("workspace scaffold defaults", () => {
     ).toBe(false);
   }, 60000);
 
+  it("does not copy local Claude settings files from framework-dev templates", () => {
+    expect(_shouldSkipScaffoldEntry("settings.json", ".claude/settings.json")).toBe(
+      true,
+    );
+    expect(
+      _shouldSkipScaffoldEntry(
+        "settings.local.json",
+        ".claude/settings.local.json",
+      ),
+    ).toBe(true);
+  });
+
   it("does not copy local agent-native runtime state", () => {
     expect(_shouldSkipScaffoldEntry(".agent-native")).toBe(true);
   });
