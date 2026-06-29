@@ -410,7 +410,7 @@ async function createAssetForRun(
 }
 
 async function attachAssetToSessionForRun(
-  db: Pick<ReturnType<typeof getDb>, "insert" | "update">,
+  db: Pick<ReturnType<typeof getDb>, "insert" | "select" | "update">,
   run: ImageRun,
   metadata: Record<string, unknown>,
   asset: ImageAsset,
@@ -418,7 +418,15 @@ async function attachAssetToSessionForRun(
   const sessionId = run.sessionId ?? metadataString(metadata, "sessionId");
   if (!sessionId) return;
 
-  const activateSessionAsset = metadata.activateSessionAsset !== false;
+  let activateSessionAsset = metadata.activateSessionAsset !== false;
+  if (!activateSessionAsset) {
+    const [session] = await db
+      .select({ activeAssetId: schema.assetGenerationSessions.activeAssetId })
+      .from(schema.assetGenerationSessions)
+      .where(eq(schema.assetGenerationSessions.id, sessionId))
+      .limit(1);
+    activateSessionAsset = !session?.activeAssetId;
+  }
   const itemCreatedAt = nowIso();
   try {
     await db.insert(schema.assetGenerationSessionItems).values({

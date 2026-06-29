@@ -413,6 +413,35 @@ describe("generateWithManagedImageProvider", () => {
     expect(requestIdempotencyKeys(fetchMock)).toEqual(["run-single-shot"]);
   });
 
+  it("does not use manual fallback for resumable single-shot image runs", async () => {
+    resolveBuilderCredentialsMock.mockResolvedValue({
+      privateKey: null,
+      publicKey: null,
+      userId: null,
+      orgName: null,
+      orgKind: null,
+    });
+    resolveSecretMock.mockImplementation(async (key: string) =>
+      key === "OPENAI_API_KEY" ? "sk-openai-test" : null,
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      generateWithManagedImageProviderOnce({
+        ...baseInput,
+        runId: "run-manual-fallback",
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: "FeatureNotConfiguredError",
+        requiredCredential: "BUILDER_PRIVATE_KEY",
+        message: expect.stringContaining("resume safely after timeouts"),
+      }),
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("uses the bounded action timeout for single-shot provider attempts", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
     const fetchMock = vi.fn(async (url: string | URL | Request) => {

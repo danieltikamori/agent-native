@@ -21,6 +21,7 @@ const schemaMock = vi.hoisted(() => ({
   assetGenerationSessionItems: {},
   assetGenerationSessions: {
     id: "sessions.id",
+    activeAssetId: "sessions.activeAssetId",
   },
 }));
 
@@ -77,6 +78,12 @@ import {
 
 type AssetRow = Record<string, any>;
 type RunRow = Record<string, any>;
+type TestState = {
+  assets: AssetRow[];
+  updates: any[];
+  sessions?: Array<Record<string, any>>;
+  sessionItems?: Array<Record<string, any>>;
+};
 
 function runRow(overrides: Partial<RunRow> = {}): RunRow {
   return {
@@ -113,7 +120,7 @@ function runRow(overrides: Partial<RunRow> = {}): RunRow {
   };
 }
 
-function createDb(state: { assets: AssetRow[]; updates: any[] }) {
+function createDb(state: TestState) {
   function rowsFor(table: unknown, condition: any) {
     if (table === schemaMock.assets) {
       if (condition?.op === "inArray") {
@@ -133,6 +140,13 @@ function createDb(state: { assets: AssetRow[]; updates: any[] }) {
     }
     if (table === schemaMock.assetLibraries) {
       return [{ id: "library-1", canonicalLogoAssetId: null }];
+    }
+    if (table === schemaMock.assetGenerationSessions) {
+      const sessions = state.sessions ?? [];
+      if (condition?.column === schemaMock.assetGenerationSessions.id) {
+        return sessions.filter((session) => session.id === condition.value);
+      }
+      return sessions;
     }
     return [];
   }
@@ -157,8 +171,13 @@ function createDb(state: { assets: AssetRow[]; updates: any[] }) {
         }),
       })),
     })),
-    insert: vi.fn(() => ({
+    insert: vi.fn((table: unknown) => ({
       values: vi.fn(async (row: AssetRow) => {
+        if (table === schemaMock.assetGenerationSessionItems) {
+          state.sessionItems ??= [];
+          state.sessionItems.push(row);
+          return;
+        }
         if (row.id && state.assets.some((asset) => asset.id === row.id)) {
           throw new Error("duplicate asset id");
         }
@@ -284,6 +303,60 @@ describe("image run finalization", () => {
     ]);
     expect(state.assets).toHaveLength(1);
     expect(state.assets[0].generationRunId).toBe("run-1");
+  });
+
+  it("promotes a background batch candidate when the session has no active asset", async () => {
+    const state = {
+      assets: [] as AssetRow[],
+      updates: [] as any[],
+      sessions: [{ id: "session-1", activeAssetId: null }],
+      sessionItems: [] as Array<Record<string, any>>,
+    };
+    const db = createDb(state);
+    getDbMock.mockReturnValue(db);
+    createAssetFromBufferMock.mockImplementation(async (input: any) => {
+      const asset = {
+        id: input.id,
+        libraryId: input.libraryId,
+        collectionId: input.collectionId,
+        generationRunId: input.generationRunId,
+      };
+      state.assets.push(asset);
+      return asset;
+    });
+    generateWithManagedImageProviderOnceMock.mockResolvedValue({
+      status: "completed",
+      output: {
+        image: Buffer.from([1, 2, 3]),
+        mimeType: "image/png",
+        model: "builder-image",
+        provider: "builder",
+      },
+    });
+
+    const result = await finalizeImageRun(
+      runRow({
+        sessionId: "session-1",
+        metadata: JSON.stringify({
+          slotId: "slot-1",
+          variantBatchId: "batch-1",
+          activateSessionAsset: false,
+        }),
+      }) as any,
+    );
+
+    expect(result.status).toBe("completed");
+    expect(state.sessionItems).toContainEqual(
+      expect.objectContaining({
+        sessionId: "session-1",
+        assetId: "image_run-1",
+        role: "active",
+      }),
+    );
+    expect(state.updates).toContainEqual({
+      activeAssetId: "image_run-1",
+      updatedAt: "2026-05-28T12:00:00.000Z",
+    });
   });
 
   it("returns processing when the inline budget elapses", async () => {

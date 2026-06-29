@@ -2290,7 +2290,9 @@ export function AssetPickerSurface() {
         setVisibleCandidateRunIds(
           images
             .map((image: any) =>
-              (image?.status === "ready" || image?.assetId) &&
+              (image?.status === "ready" ||
+                image?.status === "processing" ||
+                image?.assetId) &&
               typeof image.runId === "string"
                 ? image.runId
                 : null,
