@@ -4,7 +4,12 @@ import { eq } from "drizzle-orm";
 import { z } from "zod";
 
 import { getDb, schema } from "../server/db/index.js";
-import { nowIso, parseJson } from "../server/lib/json.js";
+import {
+  finalizeImageRunWithinBudget,
+  IMAGE_GENERATION_REFRESH_ATTEMPT_MS,
+  markImageRunFailed,
+} from "../server/lib/image-runs.js";
+import { parseJson } from "../server/lib/json.js";
 import { completeVideoGenerationRun } from "../server/lib/video-runs.js";
 import { serializeAsset, serializeGenerationRun } from "./_helpers.js";
 import { upsertVariantSlot } from "./variant-slots.js";
@@ -69,6 +74,7 @@ async function refreshImageRun(
   run: typeof schema.assetGenerationRuns.$inferSelect,
 ) {
   const db = getDb();
+  const metadata = parseJson<Record<string, unknown>>(run.metadata, {});
   const assets = await db
     .select()
     .from(schema.assets)
@@ -76,17 +82,14 @@ async function refreshImageRun(
 
   const outputAsset = assets[0] ?? null;
   if (outputAsset) {
-    let nextRun = run;
-    if (run.status !== "completed") {
-      const completedAt = nowIso();
-      await db
-        .update(schema.assetGenerationRuns)
-        .set({ status: "completed", completedAt })
-        .where(eq(schema.assetGenerationRuns.id, run.id));
-      nextRun = { ...run, status: "completed", completedAt };
-    }
-    await syncImageVariantSlot(nextRun, "ready", { asset: outputAsset });
-    return { run: nextRun, assets };
+    const completed = await finalizeImageRunWithinBudget(
+      run,
+      IMAGE_GENERATION_REFRESH_ATTEMPT_MS,
+    );
+    return {
+      run: completed.run,
+      assets: completed.status === "completed" ? [completed.asset] : assets,
+    };
   }
 
   if (run.status === "failed") {
@@ -96,26 +99,35 @@ async function refreshImageRun(
     return { run, assets: [] };
   }
 
-  if (imageRunAgeMs(run) >= STALE_IMAGE_RUN_MS) {
-    const completedAt = nowIso();
-    await db
-      .update(schema.assetGenerationRuns)
-      .set({
-        status: "failed",
-        error: INTERRUPTED_IMAGE_RUN_ERROR,
-        completedAt,
-      })
-      .where(eq(schema.assetGenerationRuns.id, run.id));
-    const failedRun = {
-      ...run,
-      status: "failed",
-      error: INTERRUPTED_IMAGE_RUN_ERROR,
-      completedAt,
-    };
-    await syncImageVariantSlot(failedRun, "failed", {
-      error: INTERRUPTED_IMAGE_RUN_ERROR,
-    });
-    return { run: failedRun, assets: [] };
+  const asyncSubmitted =
+    metadata.providerStatus === "processing" ||
+    typeof metadata.startedAt === "string";
+  if (run.status === "pending" || run.status === "processing") {
+    if (asyncSubmitted) {
+      try {
+        const completed = await finalizeImageRunWithinBudget(
+          { ...run, status: "processing" },
+          IMAGE_GENERATION_REFRESH_ATTEMPT_MS,
+        );
+        return {
+          run: completed.run,
+          assets: completed.status === "completed" ? [completed.asset] : [],
+        };
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Image generation failed.";
+        const failedRun = await markImageRunFailed({ run, message });
+        return { run: failedRun, assets: [] };
+      }
+    }
+
+    if (imageRunAgeMs(run) >= STALE_IMAGE_RUN_MS) {
+      const failedRun = await markImageRunFailed({
+        run,
+        message: INTERRUPTED_IMAGE_RUN_ERROR,
+      });
+      return { run: failedRun, assets: [] };
+    }
   }
 
   return { run, assets: [] };
@@ -123,7 +135,7 @@ async function refreshImageRun(
 
 export default defineAction({
   description:
-    "Refresh a generation run. Use this to poll async video runs, and to reconcile an interrupted or stale pending image slot by runId before retrying generation.",
+    "Refresh a generation run by runId until it completes and creates assets. The Assets live variant tray already polls image runs automatically, so normal in-app chat agents should not call this after generate-image or generate-image-batch unless the user asks, there is no visible tray, or the caller is headless. Continue using this for async video runs.",
   schema: z.object({
     runId: z.string(),
   }),
@@ -134,6 +146,17 @@ export default defineAction({
       .from(schema.assetGenerationRuns)
       .where(eq(schema.assetGenerationRuns.id, runId))
       .limit(1);
+    if (!run && runId.startsWith("pending-")) {
+      return {
+        run: {
+          id: runId,
+          status: "pending",
+          mediaType: "image",
+          metadata: { placeholder: true },
+        },
+        assets: [],
+      };
+    }
     if (!run) throw new Error("Generation run not found.");
     await assertAccess("asset-library", run.libraryId, "editor");
     if ((run.mediaType ?? "image") !== "video") {

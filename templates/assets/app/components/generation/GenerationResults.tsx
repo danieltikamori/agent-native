@@ -44,14 +44,19 @@ function slotTime(slot: AssetVariantState["slots"][number]): number {
   return Number.isNaN(time) ? 0 : time;
 }
 
-function stalePendingRunId(
+const PENDING_SLOT_REFRESH_GRACE_MS = 5_000;
+
+function pollablePendingRunId(
   slot: AssetVariantState["slots"][number],
 ): string | null {
   if (slot.status !== "pending") return null;
   if (!slot.runId) return null;
+  if (slot.runId.startsWith("pending-")) return null;
   const timestamp = slotTime(slot);
   if (!timestamp) return null;
-  return Date.now() - timestamp >= 2 * 60 * 1000 ? slot.runId : null;
+  return Date.now() - timestamp >= PENDING_SLOT_REFRESH_GRACE_MS
+    ? slot.runId
+    : null;
 }
 
 export function GenerationResults({ threadId }: { threadId: string | null }) {
@@ -101,7 +106,7 @@ export function GenerationResults({ threadId }: { threadId: string | null }) {
     if (!belongsToThread) return;
     if (!slots.length || refreshGeneration.isPending) return;
     const runId = slots
-      .map(stalePendingRunId)
+      .map(pollablePendingRunId)
       .find((id): id is string =>
         Boolean(id && !refreshingRunIds.current.has(id)),
       );

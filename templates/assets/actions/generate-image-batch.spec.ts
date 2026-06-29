@@ -202,6 +202,7 @@ describe("generate-image-batch", () => {
       {
         slotId: "slot-1",
         ok: false,
+        status: "dismissed",
         dismissed: true,
         runId: "run-1",
         error: "Candidate was dismissed before it completed.",
@@ -209,6 +210,45 @@ describe("generate-image-batch", () => {
       expect.objectContaining({
         slotId: "slot-2",
         ok: true,
+        id: "asset-2",
+        runId: "run-2",
+      }),
+    ]);
+  });
+
+  it("reports slow slots as processing instead of failed", async () => {
+    generateImageRunMock
+      .mockResolvedValueOnce({
+        runId: "run-1",
+        status: "processing",
+        message: "Image generation is still processing.",
+      })
+      .mockResolvedValueOnce({
+        id: "asset-2",
+        runId: "run-2",
+        status: "ready",
+      });
+
+    const result = await action.run({
+      libraryId: "lib-1",
+      slots: [
+        { slotId: "slot-1", prompt: "First" },
+        { slotId: "slot-2", prompt: "Second" },
+      ],
+    });
+
+    expect(result.images).toEqual([
+      {
+        slotId: "slot-1",
+        ok: true,
+        status: "processing",
+        runId: "run-1",
+        message: "Image generation is still processing.",
+      },
+      expect.objectContaining({
+        slotId: "slot-2",
+        ok: true,
+        status: "ready",
         id: "asset-2",
         runId: "run-2",
       }),

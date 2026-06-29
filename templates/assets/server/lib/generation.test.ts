@@ -4,6 +4,7 @@ import {
   compareReferenceCandidates,
   compilePrompt,
   generateWithManagedImageProvider,
+  generateWithManagedImageProviderOnce,
 } from "./generation.js";
 import type { GenerateProviderInput } from "./generation.js";
 
@@ -393,6 +394,54 @@ describe("generateWithManagedImageProvider", () => {
       "run-poll-1",
       "run-poll-1",
     ]);
+  });
+
+  it("returns processing from the single-shot path when a managed request is still running", async () => {
+    const fetchMock = mockBuilderFailure(409, {
+      code: "request_in_progress",
+      message:
+        "An image generation request with this idempotency key is already in progress.",
+    });
+
+    await expect(
+      generateWithManagedImageProviderOnce({
+        ...baseInput,
+        runId: "run-single-shot",
+      }),
+    ).resolves.toEqual({ status: "processing" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestIdempotencyKeys(fetchMock)).toEqual(["run-single-shot"]);
+  });
+
+  it("uses the bounded action timeout for single-shot provider attempts", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      if (String(url).endsWith("/generations")) {
+        return builderGenerationSuccess();
+      }
+      return builderImageBytes();
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      await expect(
+        generateWithManagedImageProviderOnce({
+          ...baseInput,
+          runId: "run-budgeted",
+          requestTimeoutMs: 1234,
+          downloadTimeoutMs: 567,
+        }),
+      ).resolves.toEqual(
+        expect.objectContaining({
+          status: "completed",
+          output: expect.objectContaining({ provider: "builder" }),
+        }),
+      );
+      expect(timeoutSpy).toHaveBeenCalledWith(1234);
+      expect(timeoutSpy).toHaveBeenCalledWith(567);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 
   it("polls after a client-side abort instead of regenerating", async () => {

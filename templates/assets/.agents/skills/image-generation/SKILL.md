@@ -28,11 +28,14 @@ Use this skill before calling `generate-image`, `generate-image-batch`, or
 - Generate the selected candidate count for open-ended requests, usually 2-4.
   Use `generate-image-batch` with stable `slotId`s so the shared generation tray
   can show live slots.
-- `generate-image` and `generate-image-batch` are synchronous for images. One
-  batch call should produce the requested candidates and return their asset
-  IDs/URLs; do not follow it with `get-generation-run`,
-  `refresh-generation-run`, or more generation unless the user asks for another
-  direction or the returned slot has `ok: false`.
+- `generate-image` and `generate-image-batch` are async-friendly for images.
+  Fast slots still return ready asset IDs/URLs inline. Slow slots return
+  `status: "processing"` with a `runId` and finish through the live variant
+  tray, which polls `refresh-generation-run` automatically in the Assets UI.
+  Do not re-issue the same generation request after a processing result. In
+  normal in-app chat, do not manually poll; tell the user the tray will update
+  when ready. Only headless callers without a visible tray should call
+  `refresh-generation-run` if they must wait for completion.
 - For repeatable deliverables, honor a `preset` @mention as `presetId` or call
   `list-generation-presets` when choosing one. Pass the preset through
   `generate-image`, `generate-image-batch`, `refine-image`, or
@@ -73,8 +76,11 @@ Use this skill before calling `generate-image`, `generate-image-batch`, or
 
 ## Completion
 
-After generation, reply with asset IDs and previews. Ask whether to save,
-iterate, or produce another direction.
+After generation, reply with ready asset IDs and previews. If any slots are
+still processing, preserve their run IDs, say they are finishing in the
+background and will appear in the live tray, then stop. Do not call
+`refresh-generation-run` from normal in-app chat unless the user asks you to
+wait or there is no visible tray.
 
 When the user says a designer should pick up the work, create a generation
 session with `create-generation-session`, including the active `assetId`,

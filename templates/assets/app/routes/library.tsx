@@ -2280,27 +2280,43 @@ export function AssetPickerSurface() {
     {
       onSuccess: (result: any) => {
         const images = Array.isArray(result?.images) ? result.images : [];
-        const generatedCount = images.filter((image: any) => image?.ok).length;
-        const failedCount = images.length - generatedCount;
+        const readyCount = images.filter(
+          (image: any) => image?.status === "ready" || image?.assetId,
+        ).length;
+        const processingCount = images.filter(
+          (image: any) => image?.status === "processing",
+        ).length;
+        const failedCount = images.length - readyCount - processingCount;
         setVisibleCandidateRunIds(
           images
             .map((image: any) =>
-              image?.ok && typeof image.runId === "string" ? image.runId : null,
+              (image?.status === "ready" || image?.assetId) &&
+              typeof image.runId === "string"
+                ? image.runId
+                : null,
             )
             .filter((runId: string | null): runId is string => Boolean(runId)),
         );
-        if (generatedCount > 0) {
+        if (readyCount > 0 || processingCount > 0) {
           toast.success(
-            `Generated ${generatedCount} image candidate${
-              generatedCount === 1 ? "" : "s"
-            }`,
+            readyCount > 0
+              ? `Generated ${readyCount} image candidate${
+                  readyCount === 1 ? "" : "s"
+                }`
+              : `Started ${processingCount} image candidate${
+                  processingCount === 1 ? "" : "s"
+                }`,
             {
               description:
                 failedCount > 0
                   ? `${failedCount} candidate${
                       failedCount === 1 ? "" : "s"
                     } failed.`
-                  : "Pick the one you want to send back.",
+                  : processingCount > 0
+                    ? `${processingCount} candidate${
+                        processingCount === 1 ? " is" : "s are"
+                      } still rendering.`
+                    : "Pick the one you want to send back.",
             },
           );
           setQuery("");

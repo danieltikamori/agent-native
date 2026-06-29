@@ -11,7 +11,7 @@ import {
 
 export default defineAction({
   description:
-    "Get a generation run and all assets produced by that run for history/debugging. Image generation actions already return completed assets; do not call this just to verify generate-image or generate-image-batch results.",
+    "Get a generation run and all assets produced by that run for history/debugging. For slow image runs in the Assets UI, the live variant tray handles polling; use refresh-generation-run only when explicitly advancing completion for headless/no-tray workflows or async video runs.",
   schema: z.object({ runId: z.string() }),
   http: { method: "GET" },
   readOnly: true,

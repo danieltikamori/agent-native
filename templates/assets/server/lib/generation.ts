@@ -50,6 +50,8 @@ export interface GenerateProviderInput {
   collectionId?: string | null;
   source?: "chat" | "ui" | "a2a";
   callerAppId?: string;
+  requestTimeoutMs?: number;
+  downloadTimeoutMs?: number;
 }
 
 export interface GenerateProviderOutput {
@@ -65,13 +67,18 @@ export interface GenerateProviderOutput {
 const MANAGED_PROVIDER_MAX_ATTEMPTS = 3;
 const MANAGED_PROVIDER_RETRY_DELAY_MS =
   process.env.NODE_ENV === "test" ? 0 : 2500;
-// A single managed image generation can legitimately run longer than one
-// request's abort window (pro models routinely exceed 90s). The request always
-// carries the run id as an idempotency key, so re-POSTing the same key replays
-// the finished result (or answers 409 "request in progress") instead of
-// starting a second, double-charged generation. When a request aborts client
-// side, hits an upstream gateway timeout, or reports in-progress, we poll the
-// same key until it resolves rather than failing. ~40 polls * 6s ≈ 4 min.
+// 90s is the absolute per-HTTP request ceiling for the managed provider. Hosted
+// action runs have a much smaller ~40s soft budget, so budgeted actions must
+// pass a shorter requestTimeoutMs and use generateWithManagedImageProviderOnce
+// instead of the legacy multi-minute retry loop below.
+const MANAGED_PROVIDER_HTTP_TIMEOUT_MS = 90_000;
+const MANAGED_PROVIDER_IMAGE_DOWNLOAD_TIMEOUT_MS = 30_000;
+// A single managed image generation can legitimately run longer than one action
+// invocation. The request always carries the run id as an idempotency key, so
+// re-POSTing the same key replays the finished result (or answers 409 "request
+// in progress") instead of starting a second, double-charged generation. This
+// legacy loop is only for non-budgeted callers; actions should poll one bounded
+// attempt at a time.
 const MANAGED_PROVIDER_INFLIGHT_MAX_POLLS =
   process.env.NODE_ENV === "test" ? 6 : 40;
 const MANAGED_PROVIDER_INFLIGHT_POLL_MS =
@@ -173,7 +180,7 @@ function isRetryableBuilderImageGenerationError(err: unknown): boolean {
 // 409 "request_in_progress" all mean the generation is still running under this
 // idempotency key. Re-POSTing the same key replays the finished result once the
 // service completes, so these are polled rather than surfaced as failures.
-function isInFlightImageGenerationError(err: unknown): boolean {
+export function isInFlightImageGenerationError(err: unknown): boolean {
   if (!(err instanceof BuilderImageGenerationError)) return false;
   return (
     err.code === "client_timeout" ||
@@ -266,7 +273,9 @@ export async function generateWithBuilderImageApi(
         intent: input.intent,
       },
     }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(
+      input.requestTimeoutMs ?? MANAGED_PROVIDER_HTTP_TIMEOUT_MS,
+    ),
   }).catch((err) => {
     if ((err as Error)?.name === "AbortError") {
       // The socket aborted, but the service keeps generating under this
@@ -305,7 +314,19 @@ export async function generateWithBuilderImageApi(
 
   const sourceUrl = output.downloadUrl ?? output.url;
   const imageResponse = await fetch(sourceUrl, {
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(
+      input.downloadTimeoutMs ?? MANAGED_PROVIDER_IMAGE_DOWNLOAD_TIMEOUT_MS,
+    ),
+  }).catch((err) => {
+    if ((err as Error)?.name === "AbortError") {
+      throw new BuilderImageGenerationError(
+        "Downloading the Builder-managed image timed out.",
+        504,
+        undefined,
+        "client_timeout",
+      );
+    }
+    throw err;
   });
   if (!imageResponse.ok) {
     throw new BuilderImageGenerationError(
@@ -368,6 +389,69 @@ async function generateWithRetryingBuilderImageApi(
   }
 }
 
+export type ManagedImageProviderSingleShotResult =
+  | {
+      status: "completed";
+      output: GenerateProviderOutput;
+    }
+  | {
+      status: "processing";
+    };
+
+function shouldFallbackToManualImageProvider(err: unknown): boolean {
+  return (
+    err instanceof BuilderImageGenerationError &&
+    [401, 402, 403, 429, 503, 504].includes(err.status ?? 0)
+  );
+}
+
+export async function generateWithManagedImageProviderOnce(
+  input: GenerateProviderInput,
+): Promise<ManagedImageProviderSingleShotResult> {
+  if (!isBuilderImageGenerationEnabled()) {
+    if (await isManualImageGenerationConfigured()) {
+      return {
+        status: "completed",
+        output: await generateWithManualImageProvider(input),
+      };
+    }
+    throw new FeatureNotConfiguredError({
+      requiredCredential: "GEMINI_API_KEY or OPENAI_API_KEY",
+      builderConnectUrl: "/_agent-native/builder/connect",
+      byokDocsUrl: "https://aistudio.google.com/apikey",
+      message:
+        "Builder-managed image generation is disabled for this deployment. Open Settings and add a Gemini or OpenAI API key manually, or re-enable Builder-managed generation.",
+    });
+  }
+
+  try {
+    return {
+      status: "completed",
+      output: await generateWithBuilderImageApi(input),
+    };
+  } catch (err) {
+    if (isInFlightImageGenerationError(err)) {
+      return { status: "processing" };
+    }
+    if (
+      shouldFallbackToManualImageProvider(err) &&
+      (await isManualImageGenerationConfigured())
+    ) {
+      return {
+        status: "completed",
+        output: await generateWithManualImageProvider(input),
+      };
+    }
+    if (
+      shouldFallbackToManualImageProvider(err) &&
+      err instanceof BuilderImageGenerationError
+    ) {
+      throw createBuilderImageGenerationFallbackError(err);
+    }
+    throw err;
+  }
+}
+
 export async function generateWithManagedImageProvider(
   input: GenerateProviderInput,
 ): Promise<GenerateProviderOutput> {
@@ -387,13 +471,16 @@ export async function generateWithManagedImageProvider(
   try {
     return await generateWithRetryingBuilderImageApi(input);
   } catch (err) {
-    const shouldFallback =
-      err instanceof BuilderImageGenerationError &&
-      [401, 402, 403, 429, 503, 504].includes(err.status ?? 0);
-    if (shouldFallback && (await isManualImageGenerationConfigured())) {
+    if (
+      shouldFallbackToManualImageProvider(err) &&
+      (await isManualImageGenerationConfigured())
+    ) {
       return generateWithManualImageProvider(input);
     }
-    if (shouldFallback && err instanceof BuilderImageGenerationError) {
+    if (
+      shouldFallbackToManualImageProvider(err) &&
+      err instanceof BuilderImageGenerationError
+    ) {
       throw createBuilderImageGenerationFallbackError(err);
     }
     throw err;

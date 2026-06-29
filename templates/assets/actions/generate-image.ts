@@ -14,18 +14,19 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 
 import { getDb, schema } from "../server/db/index.js";
-import { createAssetFromBuffer } from "../server/lib/assets.js";
 import { applyPromptTemplate } from "../server/lib/generation-presets.js";
 import {
   compilePrompt,
   DEFAULT_GENERATION_REFERENCE_LIMIT,
-  generateWithManagedImageProvider,
   isImageGenerationSetupError,
   selectReferences,
 } from "../server/lib/generation.js";
-import { compositeLogo } from "../server/lib/image-processing.js";
+import {
+  finalizeImageRunWithinBudget,
+  IMAGE_GENERATION_INLINE_FAST_PATH_MS,
+  markImageRunFailed,
+} from "../server/lib/image-runs.js";
 import { nowIso, parseJson, stringifyJson } from "../server/lib/json.js";
-import { getObject } from "../server/lib/storage.js";
 import {
   ASPECT_RATIOS,
   GENERATION_INTENTS,
@@ -42,6 +43,7 @@ import {
 import {
   requireGenerationSessionInLibrary,
   serializeAsset,
+  serializeGenerationRun,
 } from "./_helpers.js";
 import { readImageModelDefault } from "./_image-model-default.js";
 import { upsertVariantSlot, wasVariantSlotDismissed } from "./variant-slots.js";
@@ -60,7 +62,7 @@ function resolveModelForTier(
 
 export default defineAction({
   description:
-    "Generate one brand-consistent image from a brand kit/library. This is synchronous for images and returns the final asset with preview/download/embed URLs. Use @brand-kit mentions as libraryId and @preset mentions as presetId when present. Use generate-image-batch for multiple independent slots; do not poll image runs after this action returns.",
+    'Generate one brand-consistent image from a brand kit/library. Fast images return a ready asset with preview/download/embed URLs; slower images return status: "processing" with a runId and finish through the live variant tray, which polls refresh-generation-run automatically in the Assets UI. Use @brand-kit mentions as libraryId and @preset mentions as presetId when present. Do not re-issue the whole request after a slow processing result. In normal in-app chat, do not manually poll; only headless callers without a visible tray should call refresh-generation-run if they must wait.',
   schema: z.object({
     libraryId: z
       .string()
@@ -352,6 +354,7 @@ export default defineAction({
       threadId: context?.threadId ?? null,
       variantScopeId,
       dismissible: dismissibleSlot,
+      activateSessionAsset: args.activateSessionAsset,
       sourceAssetId: args.sourceAssetId,
       subjectAssetId: args.subjectAssetId,
       intent: args.intent,
@@ -375,6 +378,7 @@ export default defineAction({
       model: resolvedModel,
       aspectRatio: resolvedAspectRatio,
       imageSize: resolvedImageSize,
+      mediaType: "image",
       groundingMode: args.groundingMode,
       referenceAssetIds: stringifyJson(references.map((ref) => ref.id)),
       status: "pending",
@@ -401,165 +405,78 @@ export default defineAction({
     });
 
     try {
-      const generated = await generateWithManagedImageProvider({
-        prompt: promptForRun,
+      const processingMetadata = {
+        ...baseMetadata,
+        mediaType: "image",
+        providerStatus: "processing",
+        startedAt: nowIso(),
+      };
+      const processingRun = {
+        id: runId,
+        libraryId: args.libraryId,
+        collectionId: resolvedCollectionId ?? null,
+        presetId: preset?.id ?? null,
+        sessionId: session?.id ?? null,
+        prompt: args.prompt,
         compiledPrompt,
-        references,
+        mediaType: "image",
         model: resolvedModel,
         aspectRatio: resolvedAspectRatio,
         imageSize: resolvedImageSize,
+        durationSeconds: null,
+        resolution: null,
         groundingMode: args.groundingMode,
-        intent: args.intent,
-        styleStrength: args.styleStrength,
-        runId,
-        libraryId: args.libraryId,
-        collectionId: resolvedCollectionId ?? null,
+        referenceAssetIds: stringifyJson(references.map((ref) => ref.id)),
+        status: "processing",
+        error: null,
+        metadata: stringifyJson(processingMetadata),
+        createdAt: now,
+        completedAt: null,
         source: args.source,
-        callerAppId: args.callerAppId,
-      });
+        callerAppId: args.callerAppId ?? null,
+        ownerEmail,
+        orgId,
+      };
+      await db
+        .update(schema.assetGenerationRuns)
+        .set({ status: "processing", metadata: processingRun.metadata })
+        .where(eq(schema.assetGenerationRuns.id, runId));
+
+      const finalized = await finalizeImageRunWithinBudget(
+        processingRun,
+        IMAGE_GENERATION_INLINE_FAST_PATH_MS,
+      );
       await deleteAppState("image-generation-setup").catch(() => {});
-      let image = generated.image;
-      let mimeType = generated.mimeType;
-      if (args.includeLogo && library.canonicalLogoAssetId) {
-        const [logo] = await db
-          .select()
-          .from(schema.assets)
-          .where(eq(schema.assets.id, library.canonicalLogoAssetId))
-          .limit(1);
-        if (logo) {
-          image = await compositeLogo({
-            image,
-            logo: await getObject(logo.objectKey),
-          });
-          mimeType = "image/png";
-        }
-      }
-      if (
-        dismissibleSlot &&
-        (await wasVariantSlotDismissed(args.libraryId, slotId, {
-          threadId: context?.threadId ?? null,
-          variantScopeId,
-        }))
-      ) {
-        await db
-          .update(schema.assetGenerationRuns)
-          .set({
-            status: "completed",
-            completedAt: nowIso(),
-            metadata: stringifyJson({
-              ...baseMetadata,
-              dismissed: true,
-              slotId,
-              referenceSelection,
-              settingsUsed,
-              provider: generated.provider,
-              providerGenerationId: generated.providerGenerationId,
-              creditsCharged: generated.creditsCharged,
-            }),
-          })
-          .where(eq(schema.assetGenerationRuns.id, runId));
+
+      if (finalized.status === "dismissed") {
         return {
           runId,
+          status: "dismissed",
           dismissed: true,
           artifactType: "image",
           Artifacts: [],
         };
       }
-      const asset = await createAssetFromBuffer({
-        libraryId: args.libraryId,
-        collectionId: resolvedCollectionId ?? null,
-        buffer: image,
-        mimeType,
-        role: "generated",
-        status: "candidate",
-        prompt: args.prompt,
-        model: generated.model,
-        aspectRatio: resolvedAspectRatio,
-        imageSize: resolvedImageSize,
-        generationRunId: runId,
-        metadata: {
-          provider: generated.provider,
-          compiledPrompt,
-          referenceAssetIds: references.map((ref) => ref.id),
-          sourceAssetId: args.sourceAssetId,
-          subjectAssetId: args.subjectAssetId,
-          intent: args.intent,
-          styleStrength: args.styleStrength,
-          tier: resolvedTier,
-          includeLogo: args.includeLogo,
-          presetId: preset?.id,
-          sessionId: session?.id,
-          generated: true,
-          sourceUrl: generated.sourceUrl,
-          providerGenerationId: generated.providerGenerationId,
-          creditsCharged: generated.creditsCharged,
-        },
-        category,
-      });
-      if (session) {
-        const itemCreatedAt = nowIso();
-        await db.insert(schema.assetGenerationSessionItems).values({
-          id: nanoid(),
-          sessionId: session.id,
-          assetId: asset.id,
-          generationRunId: runId,
-          role: args.activateSessionAsset ? "active" : "candidate",
-          note: null,
-          sortOrder: 100,
-          createdAt: itemCreatedAt,
-        });
-        if (args.activateSessionAsset) {
-          await db
-            .update(schema.assetGenerationSessions)
-            .set({ activeAssetId: asset.id, updatedAt: itemCreatedAt })
-            .where(eq(schema.assetGenerationSessions.id, session.id));
-        }
+
+      if (finalized.status === "processing") {
+        return {
+          run: serializeGenerationRun(finalized.run),
+          runId,
+          status: "processing",
+          artifactType: "image",
+          message:
+            "Image generation is still processing. The live candidate tray will poll and update when it is ready; do not re-issue the generation request. Headless callers without the tray may call refresh-generation-run if they must wait.",
+          Artifacts: [],
+        };
       }
-      await db
-        .update(schema.assetGenerationRuns)
-        .set({
-          status: "completed",
-          completedAt: nowIso(),
-          metadata: stringifyJson({
-            ...baseMetadata,
-            assetId: asset.id,
-            outputAssetIds: [asset.id],
-            slotId,
-            sourceAssetId: args.sourceAssetId,
-            subjectAssetId: args.subjectAssetId,
-            intent: args.intent,
-            styleStrength: args.styleStrength,
-            tier: resolvedTier,
-            includeLogo: args.includeLogo,
-            categories: resolvedCategories ?? [],
-            referenceSelection,
-            settingsUsed,
-            provider: generated.provider,
-            providerGenerationId: generated.providerGenerationId,
-            creditsCharged: generated.creditsCharged,
-          }),
-        })
-        .where(eq(schema.assetGenerationRuns.id, runId));
+
+      const asset = finalized.asset;
       const serialized = serializeAsset(asset);
-      await upsertVariantSlot({
-        runId,
-        batchId: args.variantBatchId ?? null,
-        libraryId: args.libraryId,
-        collectionId: resolvedCollectionId ?? null,
-        presetId: preset?.id ?? null,
-        sessionId: session?.id ?? null,
-        threadId: context?.threadId ?? null,
-        variantScopeId,
-        prompt: args.prompt,
-        slotId,
-        status: "ready",
-        assetId: asset.id,
-        previewUrl: serialized.previewUrl,
-        thumbnailUrl: serialized.thumbnailUrl,
-      });
       return {
         ...serialized,
         runId,
+        assetId: asset.id,
+        status: "ready",
         artifactType: "image",
         Artifacts: [
           `Image: ${serialized.url} (ID: ${asset.id}, Run: ${runId})`,
@@ -588,19 +505,34 @@ export default defineAction({
       ) {
         throw err;
       }
-      await upsertVariantSlot({
-        runId,
-        batchId: args.variantBatchId ?? null,
-        libraryId: args.libraryId,
-        collectionId: resolvedCollectionId ?? null,
-        presetId: preset?.id ?? null,
-        sessionId: session?.id ?? null,
-        threadId: context?.threadId ?? null,
-        variantScopeId,
-        prompt: args.prompt,
-        slotId,
-        status: "failed",
-        error: message,
+      await markImageRunFailed({
+        run: {
+          id: runId,
+          libraryId: args.libraryId,
+          collectionId: resolvedCollectionId ?? null,
+          presetId: preset?.id ?? null,
+          sessionId: session?.id ?? null,
+          prompt: args.prompt,
+          compiledPrompt,
+          mediaType: "image",
+          model: resolvedModel,
+          aspectRatio: resolvedAspectRatio,
+          imageSize: resolvedImageSize,
+          durationSeconds: null,
+          resolution: null,
+          groundingMode: args.groundingMode,
+          referenceAssetIds: stringifyJson(references.map((ref) => ref.id)),
+          status: "failed",
+          error: message,
+          metadata: stringifyJson(baseMetadata),
+          createdAt: now,
+          completedAt: null,
+          source: args.source,
+          callerAppId: args.callerAppId ?? null,
+          ownerEmail,
+          orgId,
+        },
+        message,
       });
       throw err;
     }

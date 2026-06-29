@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const assertAccessMock = vi.hoisted(() => vi.fn());
 const getDbMock = vi.hoisted(() => vi.fn());
 const completeVideoGenerationRunMock = vi.hoisted(() => vi.fn());
+const finalizeImageRunWithinBudgetMock = vi.hoisted(() => vi.fn());
+const markImageRunFailedMock = vi.hoisted(() => vi.fn());
 const upsertVariantSlotMock = vi.hoisted(() => vi.fn());
 const updateSetCalls = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 
@@ -31,6 +33,12 @@ vi.mock("drizzle-orm", () => ({
 vi.mock("../server/db/index.js", () => ({
   getDb: getDbMock,
   schema: schemaMock,
+}));
+
+vi.mock("../server/lib/image-runs.js", () => ({
+  finalizeImageRunWithinBudget: finalizeImageRunWithinBudgetMock,
+  IMAGE_GENERATION_REFRESH_ATTEMPT_MS: 25,
+  markImageRunFailed: markImageRunFailedMock,
 }));
 
 vi.mock("../server/lib/video-runs.js", () => ({
@@ -104,6 +112,16 @@ describe("refresh-generation-run", () => {
     updateSetCalls.length = 0;
     assertAccessMock.mockResolvedValue(undefined);
     upsertVariantSlotMock.mockResolvedValue(undefined);
+    finalizeImageRunWithinBudgetMock.mockImplementation(async (run) => ({
+      status: "processing",
+      run,
+    }));
+    markImageRunFailedMock.mockImplementation(async ({ run, message }) => ({
+      ...run,
+      status: "failed",
+      error: message,
+      completedAt: "2026-05-28T12:00:00.000Z",
+    }));
   });
 
   afterEach(() => {
@@ -140,23 +158,13 @@ describe("refresh-generation-run", () => {
     const result = await action.run({ runId: "run-1" });
 
     expect(result.run.status).toBe("failed");
-    expect(updateSetCalls[0]).toEqual(
+    expect(markImageRunFailedMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: "failed",
-        completedAt: "2026-05-28T12:00:00.000Z",
+        run: expect.objectContaining({ id: "run-1" }),
+        message: expect.stringContaining("interrupted"),
       }),
     );
-    expect(upsertVariantSlotMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runId: "run-1",
-        batchId: "batch-1",
-        libraryId: "library-1",
-        threadId: "thread-1",
-        variantScopeId: "thread-1",
-        slotId: "agent-workflow-final",
-        status: "failed",
-      }),
-    );
+    expect(finalizeImageRunWithinBudgetMock).not.toHaveBeenCalled();
     expect(completeVideoGenerationRunMock).not.toHaveBeenCalled();
   });
 
@@ -180,17 +188,59 @@ describe("refresh-generation-run", () => {
       }),
     );
 
+    finalizeImageRunWithinBudgetMock.mockResolvedValueOnce({
+      status: "completed",
+      run: { id: "run-2", status: "completed" },
+      asset: { id: "asset-1" },
+    });
+
     const result = await action.run({ runId: "run-2" });
 
     expect(result.assets).toEqual([expect.objectContaining({ id: "asset-1" })]);
-    expect(upsertVariantSlotMock).toHaveBeenCalledWith(
+    expect(finalizeImageRunWithinBudgetMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        runId: "run-2",
-        slotId: "hero-slot",
-        status: "ready",
-        assetId: "asset-1",
-        previewUrl: "/api/assets/asset-1/content",
+        id: "run-2",
+      }),
+      25,
+    );
+  });
+
+  it("polls an async image run once and leaves it processing when not ready", async () => {
+    getDbMock.mockReturnValue(
+      createDb({
+        run: {
+          id: "run-3",
+          libraryId: "library-1",
+          collectionId: null,
+          presetId: null,
+          sessionId: null,
+          prompt: "Slow image",
+          mediaType: "image",
+          status: "processing",
+          error: null,
+          metadata: JSON.stringify({
+            slotId: "slow-slot",
+            providerStatus: "processing",
+            startedAt: "2026-05-28T11:59:45.000Z",
+          }),
+          createdAt: "2026-05-28T11:59:45.000Z",
+        },
+        assets: [],
       }),
     );
+    finalizeImageRunWithinBudgetMock.mockImplementation(async (run) => ({
+      status: "processing",
+      run,
+    }));
+
+    const result = await action.run({ runId: "run-3" });
+
+    expect(result.run.status).toBe("processing");
+    expect(result.assets).toEqual([]);
+    expect(finalizeImageRunWithinBudgetMock).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "run-3", status: "processing" }),
+      25,
+    );
+    expect(markImageRunFailedMock).not.toHaveBeenCalled();
   });
 });

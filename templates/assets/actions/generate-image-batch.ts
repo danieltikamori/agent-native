@@ -24,7 +24,7 @@ import { upsertVariantSlot } from "./variant-slots.js";
 
 export default defineAction({
   description:
-    "Generate several brand-consistent images in parallel from one brand kit/library. Use @brand-kit mentions as libraryId and @preset mentions as presetId when present. This is synchronous for images: one call waits for every slot and returns final image artifacts. Use this for slide decks, landing pages, and multi-slot design work. Do not call get-generation-run or refresh-generation-run after a normal image batch result.",
+    'Generate several brand-consistent images in parallel from one brand kit/library. Use @brand-kit mentions as libraryId and @preset mentions as presetId when present. Fast slots return ready image artifacts; slower slots return status: "processing" with runIds and finish through the live variant tray, which polls refresh-generation-run automatically in the Assets UI. Use this for slide decks, landing pages, and multi-slot design work. Do not re-issue the whole batch after slow processing results. In normal in-app chat, do not manually poll; only headless callers without a visible tray should call refresh-generation-run if they must wait.',
   schema: z.object({
     libraryId: z
       .string()
@@ -194,9 +194,22 @@ function serializeBatchResult(
     return {
       slotId,
       ok: false,
+      status: "dismissed",
       dismissed: true,
       runId: stringValue(result.value.runId),
       error: "Candidate was dismissed before it completed.",
+    };
+  }
+
+  if (result.value.status === "processing") {
+    return {
+      slotId,
+      ok: true,
+      status: "processing",
+      runId: stringValue(result.value.runId),
+      message:
+        stringValue(result.value.message) ??
+        "Image generation is still processing; the live candidate tray will update when it is ready.",
     };
   }
 
@@ -204,12 +217,13 @@ function serializeBatchResult(
     return {
       slotId,
       ok: false,
+      status: "failed",
       runId: stringValue(result.value.runId),
       error: "Image generation finished without an asset.",
     };
   }
 
-  return { slotId, ok: true, ...result.value };
+  return { slotId, ok: true, status: "ready", ...result.value };
 }
 
 function imageAssetId(value: Record<string, unknown>): string | undefined {

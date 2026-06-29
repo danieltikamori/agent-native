@@ -61,10 +61,13 @@ or generated image/video assets that another app can reference by ID and URL.
    library is editable and reusable like any other library.
 2. For one asset, call `generate-image`; for multiple independent slots, call
    `generate-image-batch` with stable `slotId` values.
-3. Image generation actions are synchronous. After `generate-image` or
-   `generate-image-batch` returns, use its returned `images` / asset fields
-   directly; do not call `get-generation-run`, `refresh-generation-run`, or
-   regenerate just to verify image runs.
+3. Image generation actions may return ready assets inline or
+   `status: "processing"` with a `runId`. Use returned asset fields directly
+   for ready results. In normal in-app chat, processing results are collected
+   by the live tray's automatic `refresh-generation-run` polling; tell the user
+   the candidates are finishing and stop. Do not regenerate the same request
+   just to verify or collect slow image runs. Only headless/no-tray callers
+   should call `refresh-generation-run` if they must wait.
 4. For preset-backed work, pass a mentioned or selected `presetId`; for handoff
    work, pass `sessionId`.
 5. Let the server choose a small deterministic reference set unless the user
