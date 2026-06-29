@@ -464,7 +464,10 @@ function isUniqueConstraintError(err: unknown): boolean {
 
 export async function finalizeImageRun(
   run: ImageRun,
-  options: { providerAttemptTimeoutMs?: number } = {},
+  options: {
+    providerAttemptTimeoutMs?: number;
+    onNonInterruptibleWorkStart?: () => void;
+  } = {},
 ): Promise<FinalizeImageRunResult> {
   const metadata = parseJson<Record<string, unknown>>(run.metadata, {});
   const existingAsset = await findAssetForRun(getDb(), run.id);
@@ -509,7 +512,11 @@ export async function finalizeImageRun(
     source: run.source as any,
     callerAppId: run.callerAppId ?? undefined,
     requestTimeoutMs: options.providerAttemptTimeoutMs,
+    onProviderOutputReady: async () => {
+      options.onNonInterruptibleWorkStart?.();
+    },
     onManualFallbackStart: async () => {
+      options.onNonInterruptibleWorkStart?.();
       if (metadataString(metadata, "manualFallbackStartedAt")) return;
       metadata.provider = "manual";
       metadata.manualFallbackStartedAt = nowIso();
@@ -605,16 +612,23 @@ export async function finalizeImageRunWithinBudget(
   waitMs: number,
 ): Promise<FinalizeImageRunResult> {
   let timedOut = false;
+  let nonInterruptibleWorkStarted = false;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const completion = finalizeImageRun(run, {
     providerAttemptTimeoutMs: waitMs,
+    onNonInterruptibleWorkStart: () => {
+      nonInterruptibleWorkStarted = true;
+    },
   }).catch((err) => {
-    if (timedOut) return { status: "processing" as const, run };
+    if (timedOut && !nonInterruptibleWorkStarted) {
+      return { status: "processing" as const, run };
+    }
     throw err;
   });
   const timeout = new Promise<FinalizeImageRunResult>((resolve) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
+      if (nonInterruptibleWorkStarted) return;
       resolve({ status: "processing", run });
     }, waitMs);
   });

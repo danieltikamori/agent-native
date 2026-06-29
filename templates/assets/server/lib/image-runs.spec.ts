@@ -449,4 +449,44 @@ describe("image run finalization", () => {
     );
     expect(state.assets).toHaveLength(0);
   });
+
+  it("waits past the budget after provider output is ready", async () => {
+    vi.useFakeTimers();
+    const state = { assets: [] as AssetRow[], updates: [] as any[] };
+    getDbMock.mockReturnValue(createDb(state));
+    generateWithManagedImageProviderOnceMock.mockImplementation(
+      async (input: any) => {
+        await input.onProviderOutputReady();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return {
+          status: "completed",
+          output: {
+            image: Buffer.from([1, 2, 3]),
+            mimeType: "image/png",
+            model: "builder-image",
+            provider: "builder",
+          },
+        };
+      },
+    );
+    createAssetFromBufferMock.mockImplementation(async (input: any) => {
+      const asset = {
+        id: input.id,
+        libraryId: input.libraryId,
+        collectionId: input.collectionId,
+        generationRunId: input.generationRunId,
+      };
+      state.assets.push(asset);
+      return asset;
+    });
+
+    const resultPromise = finalizeImageRunWithinBudget(runRow() as any, 10);
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(50);
+
+    await expect(resultPromise).resolves.toEqual(
+      expect.objectContaining({ status: "completed" }),
+    );
+    expect(state.assets).toHaveLength(1);
+  });
 });

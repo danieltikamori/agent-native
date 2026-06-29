@@ -464,6 +464,7 @@ describe("generateWithManagedImageProvider", () => {
 
   it("uses the bounded action timeout for single-shot provider attempts", async () => {
     const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const onProviderOutputReady = vi.fn(async () => undefined);
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       if (String(url).endsWith("/generations")) {
         return builderGenerationSuccess();
@@ -479,6 +480,7 @@ describe("generateWithManagedImageProvider", () => {
           runId: "run-budgeted",
           requestTimeoutMs: 1234,
           downloadTimeoutMs: 567,
+          onProviderOutputReady,
         }),
       ).resolves.toEqual(
         expect.objectContaining({
@@ -488,6 +490,7 @@ describe("generateWithManagedImageProvider", () => {
       );
       expect(timeoutSpy).toHaveBeenCalledWith(1234);
       expect(timeoutSpy).toHaveBeenCalledWith(567);
+      expect(onProviderOutputReady).toHaveBeenCalledTimes(1);
     } finally {
       timeoutSpy.mockRestore();
     }

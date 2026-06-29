@@ -52,6 +52,7 @@ export interface GenerateProviderInput {
   callerAppId?: string;
   requestTimeoutMs?: number;
   downloadTimeoutMs?: number;
+  onProviderOutputReady?: () => Promise<void>;
   onManualFallbackStart?: () => Promise<void>;
 }
 
@@ -314,6 +315,7 @@ export async function generateWithBuilderImageApi(
   }
 
   const sourceUrl = output.downloadUrl ?? output.url;
+  await input.onProviderOutputReady?.();
   const imageResponse = await fetch(sourceUrl, {
     signal: AbortSignal.timeout(
       input.downloadTimeoutMs ?? MANAGED_PROVIDER_IMAGE_DOWNLOAD_TIMEOUT_MS,
