@@ -451,7 +451,7 @@ describe("shareable resource access helpers", () => {
           resourceId: "doc-actions",
           visibility: "org",
         }),
-      ).resolves.toEqual({ ok: true, visibility: "org" });
+      ).rejects.toBeInstanceOf(ForbiddenError);
       await expect(
         setResourceVisibility.run({
           resourceType,
@@ -510,6 +510,11 @@ describe("shareable resource access helpers", () => {
       principalId: viewerEmail,
       role: "admin",
     });
+    const [doc] = await db
+      .select()
+      .from(docs)
+      .where(eq(docs.id, "doc-actions"));
+    expect(doc).toMatchObject({ visibility: "org" });
   });
 
   it("upserts and revokes user shares case-insensitively", async () => {
