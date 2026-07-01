@@ -5866,6 +5866,11 @@ export default function DesignEditor() {
     const next = titleDraft.trim();
     if (!next || next === design?.title) return;
 
+    const designQueryKey = ["action", "get-design", { id }];
+    const previousDesign = queryClient.getQueryData(designQueryKey);
+    const previousListDesignsQueries = queryClient.getQueriesData({
+      queryKey: ["action", "list-designs"],
+    });
     queryClient.setQueryData(["action", "get-design", { id }], (old: any) => {
       if (!old || typeof old !== "object") return old;
       return { ...old, title: next };
@@ -5885,7 +5890,12 @@ export default function DesignEditor() {
 
     updateDesignMutation.mutate({ id, title: next } as any, {
       onError: () => {
+        queryClient.setQueryData(designQueryKey, previousDesign);
+        for (const [queryKey, data] of previousListDesignsQueries) {
+          queryClient.setQueryData(queryKey, data);
+        }
         queryClient.invalidateQueries({ queryKey: ["action", "get-design"] });
+        queryClient.invalidateQueries({ queryKey: ["action", "list-designs"] });
       },
     });
   }, [
