@@ -108,6 +108,7 @@ cd templates/content && pnpm action <name> [args]
 | `list-local-component-files`                |                                                                                                                                                                | List registered local MDX component source files                                                                                        |
 | `write-local-component-file`                | `--workspaceId <id> --path <relative-component-path> --content <source>`                                                                                       | Create or update a file in a registered local `components/` folder                                                                      |
 | `create-content-database`                   | `[--documentId <id>] [--parentId <id>] [--title <text>]`                                                                                                       | Create a database page or convert an existing page into a database                                                                      |
+| `configure-docs-content-dogfood-workspace`  | `[--databaseId <id>] [--documentId <id>] [--title <text>] [--updateRowStatusFields true\|false]`                                                               | Create or upgrade the internal Builder docs/blog dogfood workspace with operations fields, source status fields, saved views, and row status backfill |
 | `get-content-database`                      | `--databaseId <id>` or `--documentId <id>`                                                                                                                     | Get a database table with property schema and item pages                                                                                |
 | `get-content-database-source`               | `--databaseId <id>` or `--documentId <id>`                                                                                                                     | Inspect local/no-source or source-backed status, mappings, row identity, freshness, and change sets                                     |
 | `attach-content-database-source`            | `--databaseId <id>` or `--documentId <id> [--sourceType mock\|builder-cms] [--sourceName] [--sourceTable] [--relationshipMode items\|details] [--join <json>]` | Attach a source binding; use `items` to add more rows and `details` to match a source onto existing rows                                |
@@ -570,6 +571,7 @@ multi-select, users can add a new board group from the board itself; this
 appends a new option to the grouped property definition.
 Use
 `create-content-database`, `get-content-database`,
+`configure-docs-content-dogfood-workspace`,
 `add-database-item`, `duplicate-database-item`, `duplicate-database-items`,
 `delete-database-items`, `move-database-item`,
 `update-content-database-view`, `list-document-properties`,
@@ -580,6 +582,15 @@ When targeting more than one database row, call `duplicate-database-items` or
 `delete-database-items` once with a native JSON array of `itemIds` or
 `documentIds`. Do not loop `duplicate-database-item` or `delete-document` for
 multi-row duplicate/delete requests.
+
+For Builder docs/blog internal dogfooding, prefer
+`configure-docs-content-dogfood-workspace` over manually creating the same
+fields and views. It creates or upgrades a practical content-operations
+workspace with persona, topic, use case, SEO angle, owner, source status,
+safe-to-edit, needs-review, and unsupported-block fields. The action can
+backfill row status fields from the current Builder source snapshot and saved
+change-set/body hydration signals, but it does not imply the separate scale,
+bulk-update, or source-component mapping lanes have landed.
 
 ## UI Components
 
