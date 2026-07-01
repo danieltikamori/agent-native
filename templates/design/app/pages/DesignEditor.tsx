@@ -165,6 +165,7 @@ import {
   type InspectorTab,
 } from "@/components/design/EditPanel";
 import type { ExportSettingsValue } from "@/components/design/inspector";
+import { InspectorAiActions } from "@/components/design/inspector/InspectorAiActions";
 import {
   LayersPanel,
   type LayersPanelFile,
@@ -1093,6 +1094,120 @@ export function hydrateMotionDockTracks(
   }));
 }
 
+const MOTION_KEYFRAME_TIME_EPSILON = 0.002;
+
+function motionCssPropertyName(property: string): string | null {
+  const trimmed = property.trim();
+  if (!trimmed || trimmed.startsWith("--")) return null;
+  const cssName = trimmed
+    .replace(/^css/, "")
+    .replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)
+    .toLowerCase();
+  return /^-?[a-z][a-z0-9-]*$/i.test(cssName) ? cssName : null;
+}
+
+function camelStyleProperty(property: string): string {
+  return property.replace(/-([a-z])/g, (_, letter: string) =>
+    letter.toUpperCase(),
+  );
+}
+
+function computedMotionStyleValue(
+  computedStyles: Record<string, string> | undefined,
+  property: string,
+): string | undefined {
+  if (!computedStyles) return undefined;
+  return (
+    computedStyles[property] ??
+    computedStyles[camelStyleProperty(property)] ??
+    computedStyles[
+      property.replace(/[A-Z]/g, (match) => `-${match.toLowerCase()}`)
+    ]
+  );
+}
+
+function defaultMotionBaseValue(property: string, nextValue: string): string {
+  if (property === "opacity") return "1";
+  if (property === "transform" || property === "filter") return "none";
+  return nextValue;
+}
+
+export function upsertMotionStyleKeyframes(args: {
+  tracks: MotionDockTrack[];
+  targetNodeId: string;
+  label: string;
+  styles: Record<string, string>;
+  computedStyles?: Record<string, string>;
+  playhead: number;
+  defaultEase?: string;
+}): MotionDockTrack[] {
+  const t = Math.max(0, Math.min(1, args.playhead));
+  const ease = args.defaultEase ?? "ease";
+  let nextTracks = args.tracks;
+
+  for (const [rawProperty, rawValue] of Object.entries(args.styles)) {
+    if (rawValue === undefined) continue;
+    const value = String(rawValue).trim();
+    if (!value) continue;
+    const property = motionCssPropertyName(rawProperty);
+    if (!property) continue;
+
+    const existingIndex = nextTracks.findIndex(
+      (track) =>
+        track.targetNodeId === args.targetNodeId && track.property === property,
+    );
+
+    if (existingIndex >= 0) {
+      nextTracks = nextTracks.map((track, index) => {
+        if (index !== existingIndex) return track;
+        const withoutCurrentTime = track.keyframes.filter(
+          (keyframe) => Math.abs(keyframe.t - t) > MOTION_KEYFRAME_TIME_EPSILON,
+        );
+        return {
+          ...track,
+          label: track.label || args.label,
+          keyframes: [...withoutCurrentTime, { t, value, ease }].sort(
+            (a, b) => a.t - b.t,
+          ),
+        };
+      });
+      continue;
+    }
+
+    const baseValue =
+      computedMotionStyleValue(args.computedStyles, property) ??
+      computedMotionStyleValue(args.computedStyles, rawProperty) ??
+      defaultMotionBaseValue(property, value);
+    const keyframes =
+      t <= MOTION_KEYFRAME_TIME_EPSILON
+        ? [
+            { t: 0, value, ease },
+            { t: 1, value: baseValue, ease },
+          ]
+        : t >= 1 - MOTION_KEYFRAME_TIME_EPSILON
+          ? [
+              { t: 0, value: baseValue, ease },
+              { t: 1, value, ease },
+            ]
+          : [
+              { t: 0, value: baseValue, ease },
+              { t, value, ease },
+              { t: 1, value: baseValue, ease },
+            ];
+    nextTracks = [
+      ...nextTracks,
+      {
+        targetNodeId: args.targetNodeId,
+        property,
+        keyframes,
+        label: args.label,
+      },
+    ];
+  }
+
+  return nextTracks;
+}
+
 export function motionTimelineFingerprint(
   fileId: string,
   timeline: MotionTimelineRow | null | undefined,
@@ -1114,6 +1229,8 @@ function buildSignInHrefForDesignIntent(intent: PostAuthDesignIntent): string {
   if (typeof window === "undefined") return base;
 
   const returnUrl = new URL(window.location.href);
+  returnUrl.search = "";
+  returnUrl.hash = "";
   returnUrl.searchParams.set("intent", intent);
   const ret = returnUrl.pathname + returnUrl.search + returnUrl.hash;
   return `${base}?return=${encodeURIComponent(ret)}`;
@@ -1174,8 +1291,11 @@ export function getAvailableContentHistoryChanges(
   activeFileId?: string | null,
 ): ContentHistoryChange[] {
   const fileIds = new Set(availableFileIds);
+  const activeFileIsAvailable = !!activeFileId && fileIds.has(activeFileId);
   return getContentHistoryChanges(entry).filter(
-    (change) => change.fileId === activeFileId || fileIds.has(change.fileId),
+    (change) =>
+      fileIds.has(change.fileId) ||
+      (activeFileIsAvailable && change.fileId === activeFileId),
   );
 }
 
@@ -1871,6 +1991,14 @@ function appendCanvasPrimitiveToHtml(
       const explicitPathData = primitive.pathData?.trim()
         ? primitive.pathData
         : null;
+      const pathViewBoxLeft = options?.preserveNegativePosition
+        ? geometry.x
+        : Math.max(0, geometry.x);
+      const pathViewBoxTop = options?.preserveNegativePosition
+        ? geometry.y
+        : Math.max(0, geometry.y);
+      const pathViewBoxWidth = Math.max(1, geometry.width);
+      const pathViewBoxHeight = Math.max(1, geometry.height);
       const points = primitive.points?.length
         ? primitive.points
         : [
@@ -1935,7 +2063,7 @@ function appendCanvasPrimitiveToHtml(
       svg.setAttribute(
         "viewBox",
         explicitPathData
-          ? `${left} ${top} ${width} ${height}`
+          ? `${pathViewBoxLeft} ${pathViewBoxTop} ${pathViewBoxWidth} ${pathViewBoxHeight}`
           : `0 0 ${width} ${height}`,
       );
       svg.setAttribute(
@@ -2340,7 +2468,7 @@ function extractLayerPosition(
 function postBeginTextEditToPreviewIframes(
   screenId: string | null,
   nodeId: string,
-): boolean {
+): "active" | "done" | false {
   if (typeof document === "undefined" || !nodeId) return false;
   const iframes = Array.from(
     document.querySelectorAll<HTMLIFrameElement>(
@@ -2352,16 +2480,18 @@ function postBeginTextEditToPreviewIframes(
   );
   const orderedIframes = targetIframes.length > 0 ? targetIframes : iframes;
   const selector = `[data-agent-native-node-id="${nodeId.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"][data-agent-native-text-editing]`;
-  if (
-    orderedIframes.some((iframe) => {
-      try {
-        return iframe.contentDocument?.querySelector(selector);
-      } catch {
-        return false;
-      }
-    })
-  ) {
-    return true;
+  for (const iframe of orderedIframes) {
+    try {
+      const doc = iframe.contentDocument;
+      const node = doc?.querySelector<HTMLElement>(
+        `[data-agent-native-node-id="${nodeId.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`,
+      );
+      const editing = doc?.querySelector(selector);
+      if (editing && doc?.activeElement === editing) return "active";
+      if (node && (node.textContent ?? "").trim().length > 0) return "done";
+    } catch {
+      // Keep retrying other iframes.
+    }
   }
   orderedIframes.forEach((iframe) => {
     iframe.contentWindow?.postMessage(
@@ -2377,13 +2507,29 @@ function scheduleBeginTextEditForScreen(
   nodeId: string,
 ) {
   if (typeof window === "undefined") return;
-  let sawEditing = false;
-  [50, 150, 300, 600, 900, 1200, 1800, 2400, 3200, 4200].forEach((delay) => {
+  let finished = false;
+  [180, 300, 600, 900, 1200, 1800, 2400, 3200, 4200].forEach((delay) => {
     window.setTimeout(() => {
-      if (sawEditing) return;
-      sawEditing = postBeginTextEditToPreviewIframes(screenId, nodeId);
+      if (finished) return;
+      finished = postBeginTextEditToPreviewIframes(screenId, nodeId) === "done";
     }, delay);
   });
+}
+
+function postShaderFillPreviewClearToPreviewIframes() {
+  if (typeof document === "undefined") return;
+  document
+    .querySelectorAll<HTMLIFrameElement>("iframe[data-design-preview-iframe]")
+    .forEach((iframe) => {
+      try {
+        iframe.contentWindow?.postMessage(
+          { type: "shader-fill-preview-clear" },
+          "*",
+        );
+      } catch {
+        // Ignore inaccessible iframe windows; same-origin previews handle this.
+      }
+    });
 }
 
 function removeElementFromHtml(
@@ -4335,6 +4481,9 @@ export default function DesignEditor() {
   const [motionTimelineId, setMotionTimelineId] = useState<string | null>(null);
   const [motionTracks, setMotionTracks] = useState<MotionDockTrack[]>([]);
   const [motionDurationMs, setMotionDurationMs] = useState(1000);
+  const [motionPlayhead, setMotionPlayhead] = useState(0);
+  const [motionAutoKeyframeEnabled, setMotionAutoKeyframeEnabled] =
+    useState(false);
   const [motionTracksDirty, setMotionTracksDirty] = useState(false);
   const [motionAutosaveRevision, setMotionAutosaveRevision] = useState(0);
   const [motionHydrationFingerprint, setMotionHydrationFingerprint] = useState<
@@ -4402,6 +4551,10 @@ export default function DesignEditor() {
     nodeId?: string;
     css: string;
   } | null>(null);
+  const clearShaderFillPreview = useCallback(() => {
+    setShaderFillPreview(null);
+    postShaderFillPreviewClearToPreviewIframes();
+  }, []);
 
   // ── Breakpoint preview state (§6.4) ─────────────────────────────────────────
   // Active breakpoint width for the current design (pixels). Controls which
@@ -5647,9 +5800,14 @@ export default function DesignEditor() {
         : undefined;
 
     // Exclude the board file — it is rendered by its own DesignCanvas instance
-    // in MultiScreenCanvas and must not appear as a screen frame.
+    // in MultiScreenCanvas and must not appear as a screen frame.  Support files
+    // such as CSS are editable files, not visual screens.
     return files
-      .filter((file) => !isBoardFile(file.filename))
+      .filter(
+        (file) =>
+          normalizedDesignFileType(file.fileType) === "html" &&
+          !isBoardFile(file.filename),
+      )
       .map((file) => {
         const metadata = getDesignDataRecord(metadataByFileId, file.id);
         const stringValue = (key: string) =>
@@ -5990,14 +6148,29 @@ export default function DesignEditor() {
     };
   }, []);
 
-  // Set active file to first file when data loads
-  useEffect(() => {
-    if (files.length > 0 && !activeFileId) {
-      setActiveFileId(files[0].id);
-    }
-  }, [files, activeFileId]);
+  const defaultActiveFile =
+    files.find(
+      (file) =>
+        normalizedDesignFileType(file.fileType) === "html" &&
+        !isBoardFile(file.filename) &&
+        file.filename.toLowerCase() === "index.html",
+    ) ??
+    files.find(
+      (file) =>
+        normalizedDesignFileType(file.fileType) === "html" &&
+        !isBoardFile(file.filename),
+    ) ??
+    files[0];
 
-  const activeFile = files.find((f) => f.id === activeFileId) ?? files[0];
+  // Set active file to the primary screen when data loads.
+  useEffect(() => {
+    if (defaultActiveFile && !activeFileId) {
+      setActiveFileId(defaultActiveFile.id);
+    }
+  }, [activeFileId, defaultActiveFile]);
+
+  const activeFile =
+    files.find((f) => f.id === activeFileId) ?? defaultActiveFile;
   activeFileIdForUndoRef.current = activeFile?.id ?? null;
   const motionTimelineQueryParams =
     id && activeFile?.id
@@ -6143,9 +6316,13 @@ export default function DesignEditor() {
       if (target && !targetFile) return false;
 
       const inspectorTab =
-        command.inspectorTab === "design" || command.inspectorTab === "tweaks"
+        command.inspectorTab === "design" ||
+        command.inspectorTab === "tweaks" ||
+        command.inspectorTab === "extensions"
           ? command.inspectorTab
-          : command.inspector === "design" || command.inspector === "tweaks"
+          : command.inspector === "design" ||
+              command.inspector === "tweaks" ||
+              command.inspector === "extensions"
             ? command.inspector
             : undefined;
       if (inspectorTab) setActiveInspectorTab(inspectorTab);
@@ -6973,12 +7150,22 @@ export default function DesignEditor() {
   const canvasIframeRef = useMemo<React.RefObject<HTMLIFrameElement | null>>(
     () => ({
       get current() {
-        return document.querySelector<HTMLIFrameElement>(
-          "iframe[data-design-preview-iframe]",
+        const iframes = Array.from(
+          document.querySelectorAll<HTMLIFrameElement>(
+            "iframe[data-design-preview-iframe]",
+          ),
+        );
+        if (!activeFile?.id) return iframes[0] ?? null;
+        return (
+          iframes.find(
+            (iframe) => iframe.dataset.screenIframeId === activeFile.id,
+          ) ??
+          iframes[0] ??
+          null
         );
       },
     }),
-    [],
+    [activeFile?.id],
   );
 
   const handleEditorDragStateChange = useCallback((active: boolean) => {
@@ -7370,6 +7557,8 @@ export default function DesignEditor() {
     setMotionTimelineId(null);
     setMotionTracks([]);
     setMotionDurationMs(1000);
+    setMotionPlayhead(0);
+    setMotionAutoKeyframeEnabled(false);
     setMotionTracksDirty(false);
     setMotionAutosaveRevision(0);
     setMotionHydrationFingerprint(null);
@@ -7511,8 +7700,36 @@ export default function DesignEditor() {
   }, [selectedCodeLayerNode, selectedElement]);
 
   useEffect(() => {
-    setShaderFillPreview(null);
-  }, [activeFile?.id, selectedElement?.selector, selectedElement?.sourceId]);
+    clearShaderFillPreview();
+  }, [
+    activeFile?.id,
+    clearShaderFillPreview,
+    selectedElement?.selector,
+    selectedElement?.sourceId,
+  ]);
+  useEffect(() => {
+    const urlParams = new URLSearchParams(location.search);
+    const urlKeepsExtensionsInspector =
+      urlParams.get("inspector") === "extensions" ||
+      urlParams.get("inspectorTab") === "extensions";
+    if (activeInspectorTab === "extensions" && urlKeepsExtensionsInspector) {
+      return;
+    }
+    clearShaderFillPreview();
+  }, [
+    activeInspectorTab,
+    clearShaderFillPreview,
+    location.pathname,
+    location.search,
+  ]);
+  useEffect(() => {
+    window.addEventListener("pagehide", clearShaderFillPreview);
+    window.addEventListener("beforeunload", clearShaderFillPreview);
+    return () => {
+      window.removeEventListener("pagehide", clearShaderFillPreview);
+      window.removeEventListener("beforeunload", clearShaderFillPreview);
+    };
+  }, [clearShaderFillPreview]);
 
   // A friendly default name for the create-component dialog, derived from the
   // selected element's layer name / tag.
@@ -7589,6 +7806,56 @@ export default function DesignEditor() {
     if (!motionDockOpen || motionTracks.length === 0) return [];
     return motionTracks.map(({ label: _label, ...track }) => track);
   }, [motionDockOpen, motionTracks]);
+
+  const upsertMotionKeyframesFromStyles = useCallback(
+    (
+      styles: Record<string, string>,
+      elementInfo?: ElementInfo,
+      selector?: string,
+    ) => {
+      if (!motionDockOpen || !motionAutoKeyframeEnabled) return;
+      const info = elementInfo ?? selectedElement ?? undefined;
+      const targetNode = info
+        ? resolveCodeLayerNodeFromElementInfo(activeCodeLayerProjection, info)
+        : selector
+          ? resolveCodeLayerNodeFromBridge(activeCodeLayerProjection, selector)
+          : selectedCodeLayerNode;
+      const targetNodeId =
+        targetNode?.dataAttributes["data-agent-native-node-id"]?.trim() ??
+        info?.sourceId ??
+        selectedCodeLayerNode?.dataAttributes[
+          "data-agent-native-node-id"
+        ]?.trim();
+      if (!targetNodeId) return;
+
+      const label =
+        targetNode?.layerName ||
+        selectedCodeLayerNode?.layerName ||
+        info?.tagName ||
+        "Selected element";
+      setMotionTracks((current) => {
+        return upsertMotionStyleKeyframes({
+          tracks: current,
+          targetNodeId,
+          label,
+          styles,
+          computedStyles:
+            info?.computedStyles ?? selectedElement?.computedStyles,
+          playhead: motionPlayhead,
+        });
+      });
+      markMotionTracksDirty();
+    },
+    [
+      activeCodeLayerProjection,
+      markMotionTracksDirty,
+      motionAutoKeyframeEnabled,
+      motionDockOpen,
+      motionPlayhead,
+      selectedCodeLayerNode,
+      selectedElement,
+    ],
+  );
 
   const inspectCodeData = useMemo<InspectCodeData | undefined>(() => {
     if (!selectedElement) return undefined;
@@ -8258,7 +8525,11 @@ export default function DesignEditor() {
   );
 
   const handlePrimitiveCreated = useCallback(
-    (screenId: string, nodeId: string, options?: { selectFrame?: boolean }) => {
+    (
+      screenId: string,
+      nodeId: string,
+      options?: { selectFrame?: boolean; nextTool?: "move" | "pen" },
+    ) => {
       // B2/B4 fix: stay in overview mode after drawing a primitive.  The user
       // drew a shape on the board — they should remain on the board with the
       // new primitive selected, matching Figma behaviour.  We activate the
@@ -8277,7 +8548,7 @@ export default function DesignEditor() {
         setOverviewSelectedScreenIds(
           options?.selectFrame === false ? [] : [screenId],
         );
-        setActiveTool("move");
+        setActiveTool(options?.nextTool ?? "move");
         setMode("edit");
       });
       // viewMode stays at "overview" — no setViewMode("single") call here.
@@ -8775,7 +9046,7 @@ export default function DesignEditor() {
           css,
         });
       },
-      onShaderFillPreviewClear: () => setShaderFillPreview(null),
+      onShaderFillPreviewClear: clearShaderFillPreview,
       onShaderFillApplied: (fileId, content, updatedAt) => {
         applyFileContentUpdate(fileId, content, {
           refreshPreview: fileId === activeFile?.id,
@@ -8792,6 +9063,7 @@ export default function DesignEditor() {
       activeFile?.updatedAt,
       activeTool,
       applyFileContentUpdate,
+      clearShaderFillPreview,
       design?.title,
       files,
       id,
@@ -9097,6 +9369,7 @@ export default function DesignEditor() {
         ([, value]) => value !== undefined,
       );
       if (entries.length === 0) return;
+      upsertMotionKeyframesFromStyles(styles, options.elementInfo, selector);
       // Base every patch off the freshest known content, not the closed-over
       // render value. Handlers that fire several onStyleChange calls in one
       // synchronous user action (e.g. fixed-size text → width+height+whiteSpace,
@@ -9413,6 +9686,7 @@ export default function DesignEditor() {
       selectedElement,
       t,
       updateLiveScreenSnapshotContent,
+      upsertMotionKeyframesFromStyles,
       ydoc,
       isSynced,
     ],
@@ -9599,8 +9873,13 @@ export default function DesignEditor() {
         styles,
         elementInfo,
       );
+      upsertMotionKeyframesFromStyles(styles, elementInfo, selector);
     },
-    [activeFile?.id, recordPendingVisualStyleEdit],
+    [
+      activeFile?.id,
+      recordPendingVisualStyleEdit,
+      upsertMotionKeyframesFromStyles,
+    ],
   );
 
   const handleVisualStructureChange = useCallback(
@@ -9918,8 +10197,15 @@ export default function DesignEditor() {
       elementInfo?: ElementInfo,
     ) => {
       recordPendingVisualStyleEdit(screenId, selector, styles, elementInfo);
+      if (screenId === activeFile?.id) {
+        upsertMotionKeyframesFromStyles(styles, elementInfo, selector);
+      }
     },
-    [recordPendingVisualStyleEdit],
+    [
+      activeFile?.id,
+      recordPendingVisualStyleEdit,
+      upsertMotionKeyframesFromStyles,
+    ],
   );
 
   const handleScreenVisualStructureChange = useCallback(
@@ -10418,16 +10704,15 @@ export default function DesignEditor() {
           ? boardFileId
           : activeFile?.id;
       if (!targetFileId || !canEditDesign || entries.length === 0) return;
-      const targetIsBoard = targetFileId === boardFileId;
       const baseContent =
         targetFileId === activeFile?.id
           ? getFreshActiveContent()
           : (getScreenContent(targetFileId) ?? "");
       if (!baseContent && targetFileId !== boardFileId) return;
       const layerHtmls = entries.map((entry) => entry.html);
-      const styleSnapshots = targetIsBoard
-        ? entries.map((entry) => entry.portableStyleSnapshot)
-        : undefined;
+      const styleSnapshots = entries.map(
+        (entry) => entry.portableStyleSnapshot,
+      );
       const applyPasteContentUpdate = (nextContent: string) => {
         if (targetFileId === activeFile?.id) {
           applyLocalContentUpdate(nextContent, {
@@ -10446,7 +10731,11 @@ export default function DesignEditor() {
       // in normal document flow instead of being an absolutely-positioned body
       // child.  Fall back to the old position-based clone when nothing is
       // selected or a "Paste here" position is provided.
-      if (!position && !targetIsBoard && selectedElement?.selector) {
+      if (
+        !position &&
+        targetFileId !== boardFileId &&
+        selectedElement?.selector
+      ) {
         const selector = selectedCanvasSelector ?? selectedElement.selector;
         const result = insertClonedHtmlLayers(baseContent, layerHtmls, {
           targetSelectors: [selector],
@@ -10533,7 +10822,6 @@ export default function DesignEditor() {
     const baseContent = getFreshActiveContent();
     if (selectedElement?.boundingRect) {
       const { x, y } = selectedElement.boundingRect;
-      const targetIsBoard = activeFile.id === boardFileId;
       const result = insertClonedHtmlLayers(
         baseContent,
         entries.map((entry) => entry.html),
@@ -10542,9 +10830,7 @@ export default function DesignEditor() {
             x: x + index * 16,
             y: y + index * 16,
           })),
-          styleSnapshots: targetIsBoard
-            ? entries.map((entry) => entry.portableStyleSnapshot)
-            : undefined,
+          styleSnapshots: entries.map((entry) => entry.portableStyleSnapshot),
         },
       );
       if (!result) return;
@@ -11187,14 +11473,11 @@ export default function DesignEditor() {
       // there is no anchor, preserve absolute mode and rebase left/top to the
       // release point so screen↔board moves behave like Figma absolute layers.
       const destNodeAttrId = result.movedNodeId ?? nodeAttrId;
-      const stylePreservedDest =
-        targetScreenId === boardFileId
-          ? applyPortableStyleSnapshotToHtml(
-              result.destHtml,
-              destNodeAttrId,
-              styleSnapshot,
-            )
-          : result.destHtml;
+      const stylePreservedDest = applyPortableStyleSnapshotToHtml(
+        result.destHtml,
+        destNodeAttrId,
+        styleSnapshot,
+      );
       const nextDestContent = targetAnchorAttrId
         ? targetDropMode === "absolute-container"
           ? targetLocalPoint && targetAnchorRect
@@ -11345,6 +11628,59 @@ export default function DesignEditor() {
         removedGeometryRedoEntries,
       );
 
+      const nextContentUndoStack: ContentHistoryEntry[] = [];
+      let removedContentUndoEntries = 0;
+      contentUndoStackRef.current.forEach((entry) => {
+        const remainingChanges = getContentHistoryChanges(entry).filter(
+          (change) => !deleteIds.has(change.fileId),
+        );
+        if (remainingChanges.length === 0) {
+          removedContentUndoEntries += 1;
+          return;
+        }
+        nextContentUndoStack.push(
+          remainingChanges.length === 1
+            ? remainingChanges[0]
+            : { changes: remainingChanges },
+        );
+      });
+      contentUndoStackRef.current = nextContentUndoStack;
+      historyOrderRef.current = removeRecentUndoRedoOrderKinds(
+        historyOrderRef.current,
+        "file-content",
+        removedContentUndoEntries,
+      );
+      const nextContentRedoStack: ContentHistoryEntry[] = [];
+      let removedContentRedoEntries = 0;
+      contentRedoStackRef.current.forEach((entry) => {
+        const remainingChanges = getContentHistoryChanges(entry).filter(
+          (change) => !deleteIds.has(change.fileId),
+        );
+        if (remainingChanges.length === 0) {
+          removedContentRedoEntries += 1;
+          return;
+        }
+        nextContentRedoStack.push(
+          remainingChanges.length === 1
+            ? remainingChanges[0]
+            : { changes: remainingChanges },
+        );
+      });
+      contentRedoStackRef.current = nextContentRedoStack;
+      redoOrderRef.current = removeRecentUndoRedoOrderKinds(
+        redoOrderRef.current,
+        "file-content",
+        removedContentRedoEntries,
+      );
+      localContentUndoStackRef.current =
+        localContentUndoStackRef.current.filter(
+          (change) => !deleteIds.has(change.fileId),
+        );
+      localContentRedoStackRef.current =
+        localContentRedoStackRef.current.filter(
+          (change) => !deleteIds.has(change.fileId),
+        );
+
       writeFrameGeometrySnapshot(nextGeometry);
       queryClient.setQueryData(["action", "get-design", { id }], (old: any) => {
         if (!old || typeof old !== "object" || !Array.isArray(old.files)) {
@@ -11488,7 +11824,7 @@ export default function DesignEditor() {
     if (!canEditDesign) return;
     const um = undoManagerRef.current;
     const canUseOverviewHistory = viewModeRef.current === "overview";
-    let prunedUndoHistory = false;
+    let prunedUndoHistory = 0;
     const undoContent = (scope: "any" | "local" | "global" = "any") => {
       if (scope !== "global" && um?.canUndo()) {
         um.undo();
@@ -11570,7 +11906,7 @@ export default function DesignEditor() {
       );
       if (changes.length === 0) {
         contentUndoStackRef.current.pop();
-        prunedUndoHistory = true;
+        prunedUndoHistory += 1;
         return false;
       }
       contentUndoStackRef.current.pop();
@@ -11638,14 +11974,24 @@ export default function DesignEditor() {
       return true;
     };
 
-    const undoByOrder = (preferred?: UndoRedoOrderKind) =>
-      preferred === "geometry"
-        ? undoGeometry() || undoContent()
-        : preferred === "file-content"
-          ? undoContent("global") || undoGeometry()
-          : preferred === "content"
-            ? undoContent("local") || undoContent("global") || undoGeometry()
-            : undoContent() || undoGeometry();
+    const undoByOrder = (preferred?: UndoRedoOrderKind) => {
+      if (preferred === "geometry") return undoGeometry() || undoContent();
+      if (preferred === "file-content") {
+        const prunedBefore = prunedUndoHistory;
+        if (undoContent("global")) return true;
+        if (prunedUndoHistory > prunedBefore) return false;
+        return undoGeometry();
+      }
+      if (preferred === "content") {
+        const prunedBefore = prunedUndoHistory;
+        return (
+          undoContent("local") ||
+          undoContent("global") ||
+          (prunedUndoHistory > prunedBefore ? false : undoGeometry())
+        );
+      }
+      return undoContent() || undoGeometry();
+    };
     let didUndo = false;
     if (canUseOverviewHistory) {
       while (!didUndo) {
@@ -11656,7 +12002,7 @@ export default function DesignEditor() {
     } else {
       didUndo = undoContent("local");
     }
-    if (didUndo || prunedUndoHistory) {
+    if (didUndo || prunedUndoHistory > 0) {
       syncUndoRedoState();
     }
   }, [
@@ -13180,7 +13526,7 @@ ${serializedHtml}
   };
 
   useEffect(() => {
-    if (viewMode === "overview") return;
+    if (viewMode === "overview" && !motionDockOpen) return;
     if (!activeFile || !activeContent.trim()) return;
     const stamped = ensureCodeLayerNodeIdsInHtml(activeContent, {
       source: {
@@ -13192,7 +13538,14 @@ ${serializedHtml}
     });
     if (!stamped.changed || stamped.content === activeContent) return;
     applyLocalContentUpdate(stamped.content, { recordHistory: false });
-  }, [activeContent, activeFile, applyLocalContentUpdate, id, viewMode]);
+  }, [
+    activeContent,
+    activeFile,
+    applyLocalContentUpdate,
+    id,
+    motionDockOpen,
+    viewMode,
+  ]);
   const activeCodeLayerTree = useMemo(
     () => buildCodeLayerTree(activeCodeLayerProjection),
     [activeCodeLayerProjection],
@@ -13984,9 +14337,7 @@ ${serializedHtml}
 
   // Detect if the active screen is a localhost/local source so we can show a banner.
   const activeScreenIsLocalSource =
-    viewMode === "single" &&
-    Boolean(activeFile) &&
-    activeOverviewScreen?.sourceType === "localhost";
+    Boolean(activeFile) && activeOverviewScreen?.sourceType === "localhost";
   const activeScreenRouteSourceFile = activeScreenIsLocalSource
     ? getLocalhostRouteSourceFile({
         sourceFile: activeOverviewScreen?.sourceFile,
@@ -15303,12 +15654,8 @@ ${serializedHtml}
             className="h-8 cursor-pointer gap-1.5 rounded-md bg-[var(--design-editor-panel-raised-bg)] px-3 text-sm shadow-none"
             aria-label={t("designEditor.signUpToSave")}
           >
-            <a
-              href={signInToSaveHref}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <span>{t("home.save")}</span>
+            <a href={signInToSaveHref} role="button">
+              <span>{t("designEditor.signUpToSave")}</span>
             </a>
           </Button>
         </TooltipTrigger>
@@ -15321,13 +15668,9 @@ ${serializedHtml}
             variant="default"
             size="sm"
             className="h-8 cursor-pointer gap-1.5 rounded-md !border-[var(--design-editor-accent-color)] !bg-[var(--design-editor-accent-color)] px-3 text-sm !text-[var(--design-editor-accent-contrast-color)] shadow-none hover:!border-[var(--design-editor-accent-hover-color)] hover:!bg-[var(--design-editor-accent-hover-color)] hover:!text-[var(--design-editor-accent-contrast-color)] focus-visible:ring-[var(--design-editor-accent-color)]"
-            aria-label={t("designEditor.signUpToShare")}
+            aria-label={t("designEditor.share")}
           >
-            <a
-              href={signInToShareHref}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
+            <a href={signInToShareHref} role="button">
               <span>{t("designEditor.share")}</span>
             </a>
           </Button>
@@ -15964,20 +16307,22 @@ ${serializedHtml}
                   activeLeftPanel === "agent" ? "flex" : "hidden",
                 )}
               >
-                <AgentChatSurface
-                  mode="panel"
-                  className="min-h-0 flex-1 border-0 bg-transparent shadow-none"
-                  storageKey={DESIGN_CHAT_STORAGE_KEY}
-                  emptyStateText={t("chat.emptyState")}
-                  suggestions={[
-                    t("chat.suggestionLandingPage"),
-                    t("chat.suggestionBrandMatch"),
-                    t("chat.suggestionMobile"),
-                  ]}
-                  scope={designChatScope}
-                  showScopeBadge={false}
-                  browserTabId={browserTabId}
-                />
+                {canEditDesign ? (
+                  <AgentChatSurface
+                    mode="panel"
+                    className="min-h-0 flex-1 border-0 bg-transparent shadow-none"
+                    storageKey={DESIGN_CHAT_STORAGE_KEY}
+                    emptyStateText={t("chat.emptyState")}
+                    suggestions={[
+                      t("chat.suggestionLandingPage"),
+                      t("chat.suggestionBrandMatch"),
+                      t("chat.suggestionMobile"),
+                    ]}
+                    scope={designChatScope}
+                    showScopeBadge={false}
+                    browserTabId={browserTabId}
+                  />
+                ) : null}
               </div>
               <div
                 className={cn(
@@ -16521,6 +16866,9 @@ ${serializedHtml}
                             }
                             fusionUrl={designFusionUrl}
                             onComponentSourceJump={handleComponentSourceJump}
+                            motionTracks={
+                              screenIsActive ? motionTracksWire : []
+                            }
                             embeddedFrame={{
                               viewportWidth: Math.max(
                                 1,
@@ -16902,6 +17250,13 @@ ${serializedHtml}
                     })
                   }
                   onRequestTweaks={handleRequestTweaks}
+                  extensionsPanel={
+                    <DesignExtensionsPanel
+                      context={designExtensionContext}
+                      hideAssetLibrary
+                      title={t("designEditor.extensions")}
+                    />
+                  }
                   onStyleChange={handleStyleChange}
                   onStylesChange={handleStylesChange}
                   onExport={handleInspectorExport}
@@ -16920,6 +17275,21 @@ ${serializedHtml}
                   }
                   defaultComponentName={defaultComponentName}
                   inspectCode={inspectCodeData}
+                  aiActions={
+                    selectedElement && selectedInspectorElements.length <= 1 ? (
+                      <InspectorAiActions
+                        selector={
+                          selectedCanvasSelector ?? selectedElement.selector
+                        }
+                        sourceId={selectedElement.sourceId}
+                        fileId={activeFile?.id}
+                        filename={activeFile?.filename}
+                        routeSourceFile={activeScreenRouteSourceFile}
+                        designId={id}
+                        canEdit={canEditDesign}
+                      />
+                    ) : undefined
+                  }
                   statesPanelProps={
                     id
                       ? {
@@ -17022,6 +17392,9 @@ ${serializedHtml}
           onTracksChange={handleMotionTracksChange}
           onDurationChange={handleMotionDurationChange}
           canvasIframeRef={canvasIframeRef}
+          autoKeyframe={motionAutoKeyframeEnabled}
+          onAutoKeyframeChange={setMotionAutoKeyframeEnabled}
+          onPlayheadChange={setMotionPlayhead}
           selectedTarget={motionSelectedTarget}
           applying={motionAutosavePending}
         />

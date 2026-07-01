@@ -117,6 +117,12 @@ export interface MotionDockProps {
   canvasIframeRef?: React.RefObject<HTMLIFrameElement | null>;
   /** Whether the parent autosave mutation is in flight. */
   applying?: boolean;
+  /** Controlled auto-keyframe state. */
+  autoKeyframe?: boolean;
+  /** Called when the auto-keyframe toggle changes. */
+  onAutoKeyframeChange?: (enabled: boolean) => void;
+  /** Called whenever the playhead moves. */
+  onPlayheadChange?: (t: number) => void;
   /**
    * The currently-selected canvas element, if any. Required to create the FIRST
    * track for a layer: the picker animates this node's
@@ -139,6 +145,9 @@ export function MotionDock({
   onDurationChange,
   canvasIframeRef,
   applying = false,
+  autoKeyframe: autoKeyframeProp,
+  onAutoKeyframeChange,
+  onPlayheadChange,
   selectedTarget = null,
 }: MotionDockProps) {
   // Controlled / uncontrolled open state.
@@ -158,8 +167,27 @@ export function MotionDock({
   const playRafRef = useRef<number | null>(null);
   const playStartRef = useRef<{ wallMs: number; startT: number } | null>(null);
 
-  // Auto-keyframe mode: clicking the canvas at a time scrubs without writing.
-  const [autoKeyframe, setAutoKeyframe] = useState(false);
+  // Auto-keyframe mode: inspector/style edits create keyframes at the playhead.
+  const [autoKeyframeInternal, setAutoKeyframeInternal] = useState(false);
+  const autoKeyframe = autoKeyframeProp ?? autoKeyframeInternal;
+  const setAutoKeyframe = useCallback(
+    (next: boolean | ((current: boolean) => boolean)) => {
+      const resolved =
+        typeof next === "function"
+          ? (next as (current: boolean) => boolean)(autoKeyframe)
+          : next;
+      setAutoKeyframeInternal(resolved);
+      onAutoKeyframeChange?.(resolved);
+    },
+    [autoKeyframe, onAutoKeyframeChange],
+  );
+  const setPlayheadValue = useCallback(
+    (next: number) => {
+      setPlayhead(next);
+      onPlayheadChange?.(next);
+    },
+    [onPlayheadChange],
+  );
 
   // Dock height (resizable via the top drag handle).
   const [dockHeight, setDockHeight] = useState(DEFAULT_DOCK_HEIGHT);
@@ -235,7 +263,7 @@ export function MotionDock({
       if (!playStartRef.current) return;
       const elapsed = now - playStartRef.current.wallMs;
       const t = Math.min(1, playStartRef.current.startT + elapsed / durationMs);
-      setPlayhead(t);
+      setPlayheadValue(t);
       sendPreview(t);
       if (t < 1) {
         playRafRef.current = requestAnimationFrame(tick);
@@ -244,7 +272,7 @@ export function MotionDock({
       }
     };
     playRafRef.current = requestAnimationFrame(tick);
-  }, [durationMs, playhead, sendPreview, stopPlayback]);
+  }, [durationMs, playhead, sendPreview, setPlayheadValue, stopPlayback]);
 
   useEffect(() => {
     return () => {
@@ -263,10 +291,10 @@ export function MotionDock({
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
       const rect = trackAreaRef.current.getBoundingClientRect();
       const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      setPlayhead(t);
+      setPlayheadValue(t);
       sendPreview(t);
     },
-    [sendPreview, stopPlayback],
+    [sendPreview, setPlayheadValue, stopPlayback],
   );
 
   const handleRulerPointerMove = useCallback(
@@ -274,10 +302,10 @@ export function MotionDock({
       if (!isDraggingPlayhead.current || !trackAreaRef.current) return;
       const rect = trackAreaRef.current.getBoundingClientRect();
       const t = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      setPlayhead(t);
+      setPlayheadValue(t);
       sendPreview(t);
     },
-    [sendPreview],
+    [sendPreview, setPlayheadValue],
   );
 
   const handleRulerPointerUp = useCallback(() => {
@@ -493,7 +521,7 @@ export function MotionDock({
                   className="size-6 shrink-0"
                   onClick={() => {
                     stopPlayback();
-                    setPlayhead(0);
+                    setPlayheadValue(0);
                     sendPreview(0);
                   }}
                   aria-label="Reset playhead"
