@@ -1189,7 +1189,6 @@ export function MultiScreenCanvas({
   const dragState = useRef<DragState | null>(null);
   const dragCleanup = useRef<(() => void) | null>(null);
   const duplicateCleanup = useRef<(() => void) | null>(null);
-  const autoFittedInitialViewRef = useRef(false);
   const handledSelectAllRequestRef = useRef(selectAllRequest);
   const handledClearSelectionRequestRef = useRef(clearSelectionRequest);
   const [isDragging, setIsDragging] = useState(false);
@@ -1510,7 +1509,7 @@ export function MultiScreenCanvas({
     setTransformBadge(null);
   }, [clearSelectionRequest, updateSelectedDraftIds, updateSelectedIds]);
 
-  // Center the lineup on first mount so the user sees screens, not whitespace.
+  // Center the lineup when the screen footprint changes so new frames stay reachable.
   useEffect(() => {
     if (!surfaceRef.current || screens.length === 0) return;
     const rect = surfaceRef.current.getBoundingClientRect();
@@ -1542,16 +1541,13 @@ export function MultiScreenCanvas({
         : scale;
     const heightFitScale =
       totalHeight > 0 ? Math.max(0.1, (rect.height - 96) / totalHeight) : scale;
-    const nextScale = !autoFittedInitialViewRef.current
-      ? Math.min(scale, widthFitScale, heightFitScale)
-      : scale;
+    const nextScale = Math.min(scale, widthFitScale, heightFitScale);
     if (nextScale < scale) {
       const nextZoom = nextScale * 100;
       zoomRef.current = nextZoom;
       setCanvasZoom(nextZoom);
       onZoomChange?.(nextZoom);
     }
-    autoFittedInitialViewRef.current = true;
     const visualLeft = Math.max(24, (rect.width - totalWidth * nextScale) / 2);
     const visualTop = Math.max(24, (rect.height - totalHeight * nextScale) / 2);
     const nextPan = {
