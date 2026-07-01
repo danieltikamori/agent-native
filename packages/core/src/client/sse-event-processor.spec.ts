@@ -77,6 +77,39 @@ function keepaliveThenDelayedDoneStream(
   });
 }
 
+function activityThenKeepaliveStream(
+  keepaliveAtMs: number,
+): ReadableStream<Uint8Array> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          `data: ${JSON.stringify({
+            type: "activity",
+            label: "Still generating image",
+            tool: "generate-image",
+          })}\n\n`,
+        ),
+      );
+      timer = setTimeout(() => {
+        try {
+          controller.enqueue(
+            new TextEncoder().encode(
+              `data: ${JSON.stringify({ type: "stream_keepalive" })}\n\n`,
+            ),
+          );
+        } catch {
+          // The watchdog may have cancelled the stream first.
+        }
+      }, keepaliveAtMs);
+    },
+    cancel() {
+      if (timer) clearTimeout(timer);
+    },
+  });
+}
+
 function preparingActionKeepaliveStream(
   tool = "edit-design",
 ): ReadableStream<Uint8Array> {
@@ -284,6 +317,37 @@ describe("SSE event processor no-progress recovery", () => {
     expect((err as AgentAutoContinueSignal).reason).toBe("no_progress");
   });
 
+  it("preserves activity trail when keepalive-only streams hit no-progress recovery", async () => {
+    vi.useFakeTimers();
+
+    const errPromise = (async () => {
+      try {
+        for await (const _ of readSSEStream(
+          activityThenKeepaliveStream(SSE_NO_PROGRESS_TIMEOUT_MS),
+          [],
+          { value: 0 },
+          undefined,
+        )) {
+          // no-op
+        }
+      } catch (err) {
+        return err;
+      }
+    })();
+
+    await vi.advanceTimersByTimeAsync(SSE_NO_PROGRESS_TIMEOUT_MS);
+    const err = await errPromise;
+
+    expect(err).toBeInstanceOf(AgentAutoContinueSignal);
+    expect((err as AgentAutoContinueSignal).reason).toBe("no_progress");
+    expect((err as AgentAutoContinueSignal).activityTrail).toEqual([
+      {
+        label: "Still generating image",
+        tool: "generate-image",
+      },
+    ]);
+  });
+
   it("does not let keepalives hide a stalled action preparation", async () => {
     vi.useFakeTimers();
 
@@ -380,6 +444,34 @@ describe("SSE event processor no-progress recovery", () => {
     expect(err).toBeInstanceOf(AgentAutoContinueSignal);
     expect((err as AgentAutoContinueSignal).reason).toBe("no_progress");
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it("preserves raw activity trail when keepalive-only streams hit no-progress recovery", async () => {
+    vi.useFakeTimers();
+    const onUpdate = vi.fn();
+
+    const errPromise = readSSEStreamRaw(
+      activityThenKeepaliveStream(SSE_NO_PROGRESS_TIMEOUT_MS),
+      [],
+      { value: 0 },
+      undefined,
+      onUpdate,
+    ).then(
+      () => undefined,
+      (err) => err,
+    );
+
+    await vi.advanceTimersByTimeAsync(SSE_NO_PROGRESS_TIMEOUT_MS);
+    const err = await errPromise;
+
+    expect(err).toBeInstanceOf(AgentAutoContinueSignal);
+    expect((err as AgentAutoContinueSignal).reason).toBe("no_progress");
+    expect((err as AgentAutoContinueSignal).activityTrail).toEqual([
+      {
+        label: "Still generating image",
+        tool: "generate-image",
+      },
+    ]);
   });
 
   it("turns raw streams that close without a terminal event into a recovery signal", async () => {

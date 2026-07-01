@@ -1262,7 +1262,10 @@ export async function* readSSEStream(
         !sawProgressEvent &&
         Date.now() - lastMeaningfulEventAt >= SSE_NO_PROGRESS_TIMEOUT_MS
       ) {
-        throw new AgentAutoContinueSignal({ reason: "no_progress" });
+        throw new AgentAutoContinueSignal({
+          reason: "no_progress",
+          activityTrail: [...activityTrail],
+        });
       }
     }
   } finally {
@@ -1431,7 +1434,10 @@ export async function readSSEStreamRaw(
         !sawProgressEvent &&
         Date.now() - lastMeaningfulEventAt >= SSE_NO_PROGRESS_TIMEOUT_MS
       ) {
-        throw new AgentAutoContinueSignal({ reason: "no_progress" });
+        throw new AgentAutoContinueSignal({
+          reason: "no_progress",
+          activityTrail: [...activityTrail],
+        });
       }
     }
   } finally {
