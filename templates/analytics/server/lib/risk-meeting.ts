@@ -14,35 +14,15 @@ import {
   isRiskSentiment,
   type PylonSentimentMap,
 } from "./pylon";
-
-// Renewal deals a CSM has flagged in HubSpot; sorted longest-in-status first.
-const ACTIVE_RISK_STATUSES = [
-  "On the Radar",
-  "Churn Risk",
-  "Confirmed Churn",
-  "No Save Attempted",
-] as const;
-
-const RISK_DEAL_PROPERTIES = [
-  "risk_status",
-  "risk_summary",
-  "risk_category",
-  "risk_status_last_updated",
-  "hs_next_step",
-  "churn_notes",
-  "total_contract_value",
-  "customer_success_owner",
-  "dealname",
-  "dealstage",
-  "closedate",
-  "pipeline",
-  "hubspot_owner_id",
-];
+import {
+  DEFAULT_RISK_MODEL_CONFIG,
+  type RiskModelConfig,
+} from "./risk-model-config";
 
 export interface RiskDeal {
   id: string;
   dealname: string;
-  riskStatus: (typeof ACTIVE_RISK_STATUSES)[number];
+  riskStatus: string;
   riskSummary: string | null;
   riskCategory: string | null;
   nextStep: string | null;
@@ -116,16 +96,36 @@ function stageLookups(pipelines: Pipeline[]) {
   return { stageLabels, pipelineLabels };
 }
 
-// Joins deals to their primary company's `root_org_id` / `domain` /
-// `account_profile` with batched association reads so a cohort of N deals
-// costs O(N/100) HTTP calls instead of N — required to stay inside the 30s
-// extension iframe budget. Property names match fusion-analytics's
-// getDealCompanyMaps() exactly: root_org_id is the primary Pylon join key
-// (also synced into Pylon as a custom field), domain is the fallback, and
-// account_profile === "Enterprise Active Customer" marks the Pylon-eligible
-// enterprise segment.
+function riskDealProperties(config: RiskModelConfig): string[] {
+  return [
+    config.statusProperty,
+    config.summaryProperty,
+    config.categoryProperty,
+    config.statusLastUpdatedProperty,
+    config.nextStepProperty,
+    config.notesProperty,
+    config.arrProperty,
+    config.ownerProperty,
+    "dealname",
+    "dealstage",
+    "closedate",
+    "pipeline",
+    "hubspot_owner_id",
+  ];
+}
+
+// Joins deals to their primary company's root-org-id / domain / segment
+// property with batched association reads so a cohort of N deals costs
+// O(N/100) HTTP calls instead of N — required to stay inside the 30s
+// extension iframe budget. Property names are configurable via
+// risk-model-config (defaults match fusion-analytics's getDealCompanyMaps()
+// exactly): the company's root-org-id property is the primary Pylon join
+// key (also synced into Pylon as a custom field), domain is the fallback,
+// and the segment property/value marks the Pylon-eligible enterprise
+// segment (e.g. "Enterprise Active Customer").
 async function buildDealCompanyMap(
   dealIds: string[],
+  config: RiskModelConfig,
 ): Promise<Map<string, CompanyInfo>> {
   const result = new Map<string, CompanyInfo>();
   if (!dealIds.length) return result;
@@ -144,14 +144,23 @@ async function buildDealCompanyMap(
   const companies = await readHubSpotObjects({
     objectType: "companies",
     ids: companyIds,
-    properties: ["root_org_id", "domain", "account_profile"],
+    properties: [
+      config.companyRootOrgIdProperty,
+      config.companyDomainProperty,
+      config.companySegmentProperty,
+    ],
   });
   const companyById = new Map<string, CompanyInfo>();
   for (const company of companies) {
     companyById.set(company.id, {
-      rootOrgId: strOrNull(company.properties.root_org_id),
-      domain: strOrNull(company.properties.domain)?.toLowerCase() ?? null,
-      accountProfile: strOrNull(company.properties.account_profile),
+      rootOrgId: strOrNull(company.properties[config.companyRootOrgIdProperty]),
+      domain:
+        strOrNull(
+          company.properties[config.companyDomainProperty],
+        )?.toLowerCase() ?? null,
+      accountProfile: strOrNull(
+        company.properties[config.companySegmentProperty],
+      ),
     });
   }
 
@@ -178,30 +187,35 @@ function lookupPylon(
   );
 }
 
-function isEnterpriseActiveCustomer(info: CompanyInfo | undefined): boolean {
-  return info?.accountProfile === "Enterprise Active Customer";
+function isEnterpriseSegment(
+  info: CompanyInfo | undefined,
+  config: RiskModelConfig,
+): boolean {
+  return info?.accountProfile === config.companySegmentValue;
 }
 
 export async function getRiskDeals(
   pylonSentimentMap: PylonSentimentMap,
+  config: RiskModelConfig = DEFAULT_RISK_MODEL_CONFIG,
 ): Promise<RiskDeal[]> {
   const allDeals: Deal[] = [];
   let after: string | undefined;
   for (let page = 0; page < 10; page++) {
     const { deals, nextAfter } = await searchHubSpotDealsByRiskStatuses({
-      riskStatuses: [...ACTIVE_RISK_STATUSES],
+      riskStatuses: config.activeStatusValues,
+      statusProperty: config.statusProperty,
       limit: 100,
       after,
-      extraProperties: RISK_DEAL_PROPERTIES,
+      extraProperties: riskDealProperties(config),
     });
     allDeals.push(...deals);
     if (!nextAfter) break;
     after = nextAfter;
   }
 
-  const activeStatuses = new Set<string>(ACTIVE_RISK_STATUSES);
+  const activeStatuses = new Set(config.activeStatusValues);
   const candidateDeals = allDeals.filter((deal) => {
-    const status = String(deal.properties.risk_status ?? "").trim();
+    const status = String(deal.properties[config.statusProperty] ?? "").trim();
     if (!activeStatuses.has(status)) return false;
     return !isPastCloseDate(deal.properties.closedate);
   });
@@ -209,7 +223,10 @@ export async function getRiskDeals(
   const [allPipelines, owners, companyByDeal] = await Promise.all([
     getDealPipelines(),
     getDealOwners(),
-    buildDealCompanyMap(candidateDeals.map((deal) => deal.id)),
+    buildDealCompanyMap(
+      candidateDeals.map((deal) => deal.id),
+      config,
+    ),
   ]);
   const lookups = stageLookups(getVisiblePipelines(allPipelines));
 
@@ -217,10 +234,10 @@ export async function getRiskDeals(
     const props = deal.properties;
     const stageId = String(props.dealstage ?? "");
     const pipelineId = String(props.pipeline ?? "");
-    const lastUpdatedMs = Number(props.risk_status_last_updated ?? "");
+    const lastUpdatedMs = Number(props[config.statusLastUpdatedProperty] ?? "");
     const hasLastUpdated = Number.isFinite(lastUpdatedMs) && lastUpdatedMs > 0;
     const ownerId = String(
-      props.customer_success_owner ?? props.hubspot_owner_id ?? "",
+      props[config.ownerProperty] ?? props.hubspot_owner_id ?? "",
     );
     const pylonEntry = lookupPylon(
       companyByDeal.get(deal.id),
@@ -230,16 +247,16 @@ export async function getRiskDeals(
     return {
       id: deal.id,
       dealname: props.dealname ?? "",
-      riskStatus: String(props.risk_status ?? "") as RiskDeal["riskStatus"],
-      riskSummary: props.risk_summary ?? null,
-      riskCategory: props.risk_category ?? null,
-      nextStep: props.hs_next_step ?? null,
-      churnNotes: props.churn_notes ?? null,
+      riskStatus: String(props[config.statusProperty] ?? ""),
+      riskSummary: props[config.summaryProperty] ?? null,
+      riskCategory: props[config.categoryProperty] ?? null,
+      nextStep: props[config.nextStepProperty] ?? null,
+      churnNotes: props[config.notesProperty] ?? null,
       daysInCurrentRiskStatus: hasLastUpdated ? daysSince(lastUpdatedMs) : 0,
       riskStatusLastUpdated: hasLastUpdated ? toIsoDate(lastUpdatedMs) : null,
       csmName: ownerId ? (owners[ownerId] ?? null) : null,
       dealStageLabel: lookups.stageLabels[stageId] ?? (stageId || null),
-      arr: toNumber(props.total_contract_value),
+      arr: toNumber(props[config.arrProperty]),
       closedate: props.closedate ?? null,
       pipeline: pipelineId
         ? (lookups.pipelineLabels[pipelineId] ?? pipelineId)
@@ -263,25 +280,27 @@ export async function getRiskDeals(
 // future-dated cohort from getRiskDeals.
 export async function getPylonOnlyRiskDeals(
   pylonSentimentMap: PylonSentimentMap,
+  config: RiskModelConfig = DEFAULT_RISK_MODEL_CONFIG,
 ): Promise<PylonEarlyWarningAccount[]> {
   const hasRiskAccounts = Array.from(pylonSentimentMap.values()).some((entry) =>
-    isRiskSentiment(entry.sentiment),
+    isRiskSentiment(entry.sentiment, config.pylonRiskSentiments),
   );
   if (!hasRiskAccounts) return [];
 
   const [allDeals, owners] = await Promise.all([
-    getAllDeals(["customer_success_owner", "total_contract_value"]),
+    getAllDeals([config.ownerProperty, config.arrProperty]),
     getDealOwners(),
   ]);
 
   const companyByDeal = await buildDealCompanyMap(
     allDeals.map((deal) => deal.id),
+    config,
   );
 
-  const activeStatuses = new Set<string>(ACTIVE_RISK_STATUSES);
+  const activeStatuses = new Set(config.activeStatusValues);
   const flaggedPylonAccountIds = new Set<string>();
   for (const deal of allDeals) {
-    const status = String(deal.properties.risk_status ?? "").trim();
+    const status = String(deal.properties[config.statusProperty] ?? "").trim();
     if (!activeStatuses.has(status)) continue;
     const entry = lookupPylon(companyByDeal.get(deal.id), pylonSentimentMap);
     if (entry) flaggedPylonAccountIds.add(entry.pylonAccountId);
@@ -295,17 +314,22 @@ export async function getPylonOnlyRiskDeals(
 
   for (const deal of allDeals) {
     const company = companyByDeal.get(deal.id);
-    if (!isEnterpriseActiveCustomer(company)) continue;
+    if (!isEnterpriseSegment(company, config)) continue;
 
     const entry = lookupPylon(company, pylonSentimentMap);
-    if (!entry || !isRiskSentiment(entry.sentiment)) continue;
+    if (
+      !entry ||
+      !isRiskSentiment(entry.sentiment, config.pylonRiskSentiments)
+    ) {
+      continue;
+    }
     if (flaggedPylonAccountIds.has(entry.pylonAccountId)) continue;
 
     const props = deal.properties;
     const ownerId = String(
-      props.customer_success_owner ?? props.hubspot_owner_id ?? "",
+      props[config.ownerProperty] ?? props.hubspot_owner_id ?? "",
     );
-    const arr = toNumber(props.total_contract_value) ?? 0;
+    const arr = toNumber(props[config.arrProperty]) ?? 0;
     const closedate = props.closedate ?? null;
     const closeMs = closedate ? Date.parse(closedate) : NaN;
 
@@ -340,11 +364,17 @@ export async function getPylonOnlyRiskDeals(
   return results.map(({ earliestCloseMs: _earliestCloseMs, ...rest }) => rest);
 }
 
-export async function getRiskMeetingData(): Promise<RiskMeetingData> {
-  const pylonSentimentMap = await getPylonSentimentMap();
+export async function getRiskMeetingData(
+  config: RiskModelConfig = DEFAULT_RISK_MODEL_CONFIG,
+): Promise<RiskMeetingData> {
+  const pylonSentimentMap = await getPylonSentimentMap({
+    sentimentField: config.pylonSentimentField,
+    rootOrgIdField: config.pylonRootOrgIdField,
+    domainField: config.pylonDomainField,
+  });
   const [deals, pylonOnlyDeals] = await Promise.all([
-    getRiskDeals(pylonSentimentMap),
-    getPylonOnlyRiskDeals(pylonSentimentMap),
+    getRiskDeals(pylonSentimentMap, config),
+    getPylonOnlyRiskDeals(pylonSentimentMap, config),
   ]);
 
   return {

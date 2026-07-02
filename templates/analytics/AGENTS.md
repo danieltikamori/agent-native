@@ -57,7 +57,16 @@ details live in `.agents/skills/`.
   cohort definition: `product` for the `products` field, `pipeline` for deal
   pipeline, `closedStatus` for won/lost/open, and `closedDateFrom` /
   `closedDateTo` for close-date windows. `query` is full-text search across
-  deals and is not valid proof that a specific property matched.
+  deals and is not valid proof that a specific property matched. For a fast
+  server-side search on a risk/status property (bypassing the full deal
+  catalog scan), pass `riskStatuses` instead of `query`.
+- For the weekly Risk Review meeting, call `risk-meeting` to get HubSpot
+  at-risk deals plus Pylon early-warning accounts in one call. Which HubSpot
+  deal/company properties and values define "at risk" (status property,
+  active status values, enterprise segment, Pylon join keys) is org-scoped
+  config, not hardcoded — read it with `get-risk-model-config` and change it
+  with `save-risk-model-config` instead of assuming Builder's Fusion Analytics
+  field names apply to every org.
 - For BigQuery, Prometheus, or other external providers, use the provider skill
   and existing credential/integration flow.
 - For questions that span multiple sources, follow `cross-source-analysis`:

@@ -470,10 +470,13 @@ function objectRecordToDeal(record: HubSpotObjectRecord): Deal {
   };
 }
 
-// CRM search on `risk_status` — used by the risk meeting review so the
-// HubSpot-flagged cohort doesn't require scanning the entire deal catalog.
+// CRM search on a risk-status property (default `risk_status`) — used by
+// the risk meeting review so the HubSpot-flagged cohort doesn't require
+// scanning the entire deal catalog. `statusProperty` is configurable so an
+// org with a differently-named CRM field doesn't need a code change.
 export async function searchHubSpotDealsByRiskStatuses(options: {
   riskStatuses: string[];
+  statusProperty?: string;
   limit?: number;
   after?: string;
   extraProperties?: string[];
@@ -487,6 +490,7 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
     return { deals: [], total: 0, nextAfter: null };
   }
 
+  const statusProperty = options.statusProperty?.trim() || "risk_status";
   const limit = Math.max(1, Math.min(100, options.limit ?? 100));
   const properties = await resolveDealProperties(options.extraProperties ?? []);
 
@@ -495,7 +499,7 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
       {
         filters: [
           {
-            propertyName: "risk_status",
+            propertyName: statusProperty,
             operator: "IN",
             values: riskStatuses,
           },
@@ -510,7 +514,7 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
   const data = await apiPost<HubSpotObjectListResponse>(
     "/crm/v3/objects/deals/search",
     body,
-    `risk-status-search:${riskStatuses.join(",")}:${limit}:${options.after ?? ""}`,
+    `risk-status-search:${statusProperty}:${riskStatuses.join(",")}:${limit}:${options.after ?? ""}`,
   );
 
   return {

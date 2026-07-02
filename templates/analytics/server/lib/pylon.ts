@@ -78,41 +78,71 @@ export async function getAccounts(query?: string): Promise<PylonAccount[]> {
   return data.data ?? (data as any);
 }
 
-// Accounts flagged with a risk sentiment in Pylon before HubSpot's
-// `risk_status` has caught up — the early-warning cohort for the risk review.
+// Default accounts flagged with a risk sentiment in Pylon before HubSpot's
+// risk-status property has caught up — the early-warning cohort for the risk
+// review. Overridable per org via risk-model-config's `pylonRiskSentiments`.
 export const PYLON_RISK_SENTIMENTS = new Set([
   "frustrated",
   "high_risk_detractor",
 ]);
 
-export function isRiskSentiment(sentiment: string | null | undefined): boolean {
-  return !!sentiment && PYLON_RISK_SENTIMENTS.has(sentiment.toLowerCase());
+export function isRiskSentiment(
+  sentiment: string | null | undefined,
+  riskSentiments: Set<string> | string[] = PYLON_RISK_SENTIMENTS,
+): boolean {
+  if (!sentiment) return false;
+  const set =
+    riskSentiments instanceof Set ? riskSentiments : new Set(riskSentiments);
+  return set.has(sentiment.toLowerCase());
 }
 
-// CSMs set `general_sentiment` on managed enterprise accounts synced from
-// HubSpot; `account.hubspot.root_org_id` / `account.hubspot.domain` are the
-// HubSpot-synced join keys Pylon stores as custom fields.
+// Default field-name mapping. CSMs set `general_sentiment` on managed
+// enterprise accounts synced from HubSpot; `account.hubspot.root_org_id` /
+// `account.hubspot.domain` are the HubSpot-synced join keys Pylon stores as
+// custom fields. Overridable per org via risk-model-config so a different
+// CRM/Pylon field layout doesn't require code changes.
+export interface PylonSentimentMapFields {
+  sentimentField: string;
+  rootOrgIdField: string;
+  domainField: string;
+}
+
+export const DEFAULT_PYLON_SENTIMENT_FIELDS: PylonSentimentMapFields = {
+  sentimentField: "general_sentiment",
+  rootOrgIdField: "account.hubspot.root_org_id",
+  domainField: "account.hubspot.domain",
+};
+
 function customFields(
   account: PylonAccount,
 ): Record<string, { value?: string }> {
   return account.custom_fields ?? {};
 }
 
-function extractSentiment(account: PylonAccount): string | null {
-  const raw = customFields(account)["general_sentiment"]?.value;
+function extractSentiment(
+  account: PylonAccount,
+  fields: PylonSentimentMapFields,
+): string | null {
+  const raw = customFields(account)[fields.sentimentField]?.value;
   return typeof raw === "string" && raw.trim()
     ? raw.trim().toLowerCase()
     : null;
 }
 
-function extractRootOrgId(account: PylonAccount): string | null {
-  const raw = customFields(account)["account.hubspot.root_org_id"]?.value;
+function extractRootOrgId(
+  account: PylonAccount,
+  fields: PylonSentimentMapFields,
+): string | null {
+  const raw = customFields(account)[fields.rootOrgIdField]?.value;
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
 }
 
-function extractDomain(account: PylonAccount): string | null {
+function extractDomain(
+  account: PylonAccount,
+  fields: PylonSentimentMapFields,
+): string | null {
   const raw =
-    customFields(account)["account.hubspot.domain"]?.value ||
+    customFields(account)[fields.domainField]?.value ||
     account.primary_domain ||
     account.domain;
   return typeof raw === "string" && raw.trim()
@@ -159,21 +189,23 @@ export interface PylonSentimentEntry {
 // collision keeping both in one map, matching the CRM company join below.
 export type PylonSentimentMap = Map<string, PylonSentimentEntry>;
 
-export async function getPylonSentimentMap(): Promise<PylonSentimentMap> {
+export async function getPylonSentimentMap(
+  fields: PylonSentimentMapFields = DEFAULT_PYLON_SENTIMENT_FIELDS,
+): Promise<PylonSentimentMap> {
   const accounts = await getAllPylonAccounts();
   const sentimentMap: PylonSentimentMap = new Map();
 
   for (const account of accounts) {
-    const sentiment = extractSentiment(account);
+    const sentiment = extractSentiment(account, fields);
     if (!sentiment) continue;
     const entry: PylonSentimentEntry = {
       sentiment,
       pylonAccountId: account.id,
       accountName: account.name,
     };
-    const rootOrgId = extractRootOrgId(account);
+    const rootOrgId = extractRootOrgId(account, fields);
     if (rootOrgId) sentimentMap.set(rootOrgId, entry);
-    const domain = extractDomain(account);
+    const domain = extractDomain(account, fields);
     if (domain) sentimentMap.set(domain, entry);
   }
 
