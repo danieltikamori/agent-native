@@ -7,7 +7,7 @@ import {
 
 export default defineAction({
   readOnly: true,
-  timeoutMs: 90_000,
+  timeoutMs: 360_000,
   description:
     "Build a secondary provider cohort by joining Pylon sentiment to HubSpot deals using caller-supplied property names (segment filter, join keys, rollup fields). Excludes accounts already matched on a primary CRM deal property.",
   schema: secondaryCohortConfigSchema,

@@ -376,7 +376,7 @@ export function buildExtensionHtml(
 	    }
 
 	    var EXTENSION_ACTION_TIMEOUT_MS = {
-	      'build-secondary-cohort': 240000,
+	      'build-secondary-cohort': 360000,
 	      'hubspot-deals': 90000,
 	    };
 

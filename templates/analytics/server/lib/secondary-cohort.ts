@@ -11,7 +11,7 @@ import {
   type HubSpotObjectRecord,
 } from "./hubspot";
 import {
-  getPylonSentimentMap,
+  getPylonSentimentMapForCohort,
   isRiskSentiment,
   type PylonSentimentEntry,
   type PylonSentimentMap,
@@ -277,11 +277,14 @@ async function computeSecondaryCohort(
   config: SecondaryCohortConfig,
 ): Promise<SecondaryCohortAccount[]> {
   const [pylonSentimentMap, flaggedDeals, owners] = await Promise.all([
-    getPylonSentimentMap({
-      sentimentField: config.pylonSentimentField,
-      rootOrgIdField: config.pylonRootOrgIdField,
-      domainField: config.pylonDomainField,
-    }),
+    getPylonSentimentMapForCohort(
+      {
+        sentimentField: config.pylonSentimentField,
+        rootOrgIdField: config.pylonRootOrgIdField,
+        domainField: config.pylonDomainField,
+      },
+      config.pylonSentimentValues,
+    ),
     fetchDealsByPropertyValues(config),
     getDealOwners(),
   ]);

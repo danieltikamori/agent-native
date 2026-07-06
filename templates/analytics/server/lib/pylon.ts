@@ -374,30 +374,9 @@ async function fetchPylonAccountsBySentiment(
       return sentiment ? normalized.includes(sentiment) : false;
     });
 
-  const seenIds = new Set<string>();
-  const mergeUnique = (raw: PylonAccount[]) => {
-    const out: PylonAccount[] = [];
-    for (const account of raw) {
-      if (seenIds.has(account.id)) continue;
-      seenIds.add(account.id);
-      out.push(account);
-    }
-    return out;
-  };
-
-  // Fast path: one bounded GET per sentiment value (typically <5s total).
-  try {
-    const batches = await Promise.all(
-      normalized.map((value) => getAccounts(value)),
-    );
-    const matched = matchAccounts(mergeUnique(batches.flat()));
-    if (matched.length) return matched;
-  } catch (error) {
-    if (isRateLimitError(error)) return [];
-    throw error;
-  }
-
-  // Structured search fallback (capped pages — unbounded pagination was timing out).
+  // Structured search on the sentiment custom field first. Text query search
+  // (`GET /accounts?query=`) matches account names, not custom-field values,
+  // and misses most of the early-warning cohort.
   try {
     const searchFilters: Record<string, unknown>[] = [
       { field: fields.sentimentField, operator: "in", values: normalized },
@@ -409,14 +388,13 @@ async function fetchPylonAccountsBySentiment(
     ];
     const searched = await searchPylonAccountsWithFilters(
       searchFilters,
-      "risk-pylon-search",
-      { maxPages: 2 },
+      "pylon-sentiment-search",
+      { maxPages: 10 },
     );
     const matched = matchAccounts(searched);
     if (matched.length) return matched;
   } catch (error) {
-    if (isRateLimitError(error)) return [];
-    throw error;
+    if (isRateLimitError(error)) throw error;
   }
 
   const fullCacheKey = scopedCredentialCacheKey(
@@ -425,10 +403,12 @@ async function fetchPylonAccountsBySentiment(
   );
   const fullCached = cache.get(fullCacheKey);
   if (fullCached) {
-    return matchAccounts(fullCached.data as PylonAccount[]);
+    const matched = matchAccounts(fullCached.data as PylonAccount[]);
+    if (matched.length) return matched;
   }
 
-  return [];
+  const all = await getAllPylonAccounts();
+  return matchAccounts(all);
 }
 
 async function loadRiskPylonSentimentMap(
@@ -440,6 +420,15 @@ async function loadRiskPylonSentimentMap(
   return accountsToSentimentMap(accounts, fields, (sentiment) =>
     normalized.includes(sentiment),
   );
+}
+
+/** Sentiment-filtered Pylon map for secondary cohort joins (avoids full catalog scan). */
+export async function getPylonSentimentMapForCohort(
+  fields: PylonSentimentMapFields,
+  sentimentValues: string[],
+): Promise<PylonSentimentMap> {
+  const normalized = sentimentValues.map((value) => value.toLowerCase());
+  return loadRiskPylonSentimentMap(fields, normalized);
 }
 
 export type PylonAccountRecord = {
@@ -619,6 +608,8 @@ export async function getPylonSentimentMapForJoinKeys(
   return sentimentMap;
 }
 
+const fullCatalogInflight = new Map<string, Promise<PylonAccount[]>>();
+
 export async function getAllPylonAccounts(): Promise<PylonAccount[]> {
   const fullCacheKey = scopedCredentialCacheKey(
     "accounts-full",
@@ -629,22 +620,34 @@ export async function getAllPylonAccounts(): Promise<PylonAccount[]> {
     return cached.data as PylonAccount[];
   }
 
-  const all: PylonAccount[] = [];
-  let cursor: string | undefined;
-  for (let page = 0; page < 50; page++) {
-    const params = new URLSearchParams({ limit: "100" });
-    if (cursor) params.set("cursor", cursor);
-    const data = await apiGet<{
-      data: PylonAccount[];
-      pagination?: { cursor?: string | null; has_next_page?: boolean };
-    }>(`/accounts?${params.toString()}`, `accounts:page:${cursor ?? "start"}`);
-    all.push(...(data.data ?? []));
-    cursor = data.pagination?.cursor ?? undefined;
-    if (!cursor || !data.pagination?.has_next_page) break;
-  }
+  const inflight = fullCatalogInflight.get(fullCacheKey);
+  if (inflight) return inflight;
 
-  cache.set(fullCacheKey, { data: all, ts: Date.now() });
-  return all;
+  const promise = (async () => {
+    const all: PylonAccount[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 50; page++) {
+      const params = new URLSearchParams({ limit: "100" });
+      if (cursor) params.set("cursor", cursor);
+      const data = await apiGet<{
+        data: PylonAccount[];
+        pagination?: { cursor?: string | null; has_next_page?: boolean };
+      }>(
+        `/accounts?${params.toString()}`,
+        `accounts:page:${cursor ?? "start"}`,
+      );
+      all.push(...(data.data ?? []));
+      cursor = data.pagination?.cursor ?? undefined;
+      if (!cursor || !data.pagination?.has_next_page) break;
+    }
+
+    cache.set(fullCacheKey, { data: all, ts: Date.now() });
+    return all;
+  })().finally(() => {
+    fullCatalogInflight.delete(fullCacheKey);
+  });
+  fullCatalogInflight.set(fullCacheKey, promise);
+  return promise;
 }
 
 export interface PylonSentimentEntry {
