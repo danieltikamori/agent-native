@@ -375,15 +375,9 @@ export function buildExtensionHtml(
 	      return match ? match[1].toUpperCase() : null;
 	    }
 
-	    var EXTENSION_ACTION_TIMEOUT_MS = {
-	      'build-secondary-cohort': 360000,
-	      'hubspot-deals': 90000,
-	      'pylon-accounts': 180000,
-	    };
-
-	    function actionRequestTimeoutMs(name, callOptions) {
+	    function actionRequestTimeoutMs(_name, callOptions) {
 	      if (callOptions && callOptions.timeoutMs) return callOptions.timeoutMs;
-	      return EXTENSION_ACTION_TIMEOUT_MS[name] || 30000;
+	      return 30000;
 	    }
 
 	    async function appAction(name, params, callOptions) {

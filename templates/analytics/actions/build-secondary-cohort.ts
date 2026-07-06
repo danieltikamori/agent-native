@@ -9,7 +9,7 @@ export default defineAction({
   readOnly: true,
   timeoutMs: 360_000,
   description:
-    "Build a secondary provider cohort by joining Pylon sentiment to HubSpot deals using caller-supplied property names (segment filter, join keys, rollup fields). Excludes accounts already matched on a primary CRM deal property.",
+    "Build a secondary-provider cohort by joining caller-supplied provider account fields to CRM deals via company join keys. All property names, segment filters, sentiment values, and rollup fields come from the request body. Excludes accounts already matched on a primary CRM deal property.",
   schema: secondaryCohortConfigSchema,
   http: { method: "POST" },
   run: async (args) => {
@@ -18,7 +18,7 @@ export default defineAction({
       accounts,
       total: accounts.length,
       guidance:
-        "Joined Pylon sentiment to HubSpot deals via company join keys, filtered by companySegmentProperty/companySegmentValue, excluding accounts already matched on dealProperty/dealPropertyValues.",
+        "Joined secondary-provider accounts to CRM deals via company join keys, filtered by companySegmentProperty/companySegmentValue, excluding accounts already matched on dealProperty/dealPropertyValues.",
     };
   },
 });
