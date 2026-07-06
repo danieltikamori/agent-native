@@ -1,6 +1,6 @@
 {
-  "statusProperty": "risk_status",
-  "activeStatusValues": [
+  "dealProperty": "risk_status",
+  "dealPropertyValues": [
     "On the Radar",
     "Churn Risk",
     "Confirmed Churn",
@@ -21,6 +21,6 @@
   "pylonSentimentField": "general_sentiment",
   "pylonRootOrgIdField": "account.hubspot.root_org_id",
   "pylonDomainField": "account.hubspot.domain",
-  "pylonRiskSentiments": ["frustrated", "high_risk_detractor"],
+  "pylonSentimentValues": ["frustrated", "high_risk_detractor"],
   "pylonAccountsEnabled": true
 }

@@ -5,7 +5,7 @@ const getDealOwners = vi.fn();
 const getDealPipelines = vi.fn();
 const getVisiblePipelines = vi.fn((pipelines) => pipelines);
 const searchHubSpotObjects = vi.fn();
-const searchHubSpotDealsByRiskStatuses = vi.fn();
+const searchHubSpotDealsByPropertyValues = vi.fn();
 
 vi.mock("../server/lib/hubspot", () => ({
   getAllDeals,
@@ -13,7 +13,7 @@ vi.mock("../server/lib/hubspot", () => ({
   getDealPipelines,
   getVisiblePipelines,
   searchHubSpotObjects,
-  searchHubSpotDealsByRiskStatuses,
+  searchHubSpotDealsByPropertyValues,
 }));
 
 const { default: hubspotDeals } = await import("./hubspot-deals");
@@ -25,14 +25,14 @@ describe("hubspot-deals action", () => {
     getDealPipelines.mockReset();
     getVisiblePipelines.mockClear();
     searchHubSpotObjects.mockReset();
-    searchHubSpotDealsByRiskStatuses.mockReset();
+    searchHubSpotDealsByPropertyValues.mockReset();
   });
 
-  it("uses HubSpot CRM search on risk_status when riskStatuses is provided", async () => {
-    searchHubSpotDealsByRiskStatuses.mockResolvedValue({
+  it("uses HubSpot CRM property IN search when propertyValues is provided", async () => {
+    searchHubSpotDealsByPropertyValues.mockResolvedValue({
       deals: [
         {
-          id: "deal-risk-1",
+          id: "deal-1",
           properties: {
             dealname: "At-risk renewal",
             dealstage: "stage-1",
@@ -79,15 +79,16 @@ describe("hubspot-deals action", () => {
     getDealOwners.mockResolvedValue({ "owner-1": "Alice Seller" });
 
     const result = (await hubspotDeals.run({
-      riskStatuses: ["Churn Risk"],
+      propertyValues: ["Churn Risk"],
+      dealProperty: "risk_status",
       limit: 100,
     })) as Record<string, any>;
 
     expect(getAllDeals).not.toHaveBeenCalled();
     expect(searchHubSpotObjects).not.toHaveBeenCalled();
-    expect(searchHubSpotDealsByRiskStatuses).toHaveBeenCalledWith({
-      riskStatuses: ["Churn Risk"],
-      statusProperty: "risk_status",
+    expect(searchHubSpotDealsByPropertyValues).toHaveBeenCalledWith({
+      propertyValues: ["Churn Risk"],
+      propertyName: "risk_status",
       limit: 100,
       after: undefined,
       extraProperties: undefined,
@@ -98,8 +99,8 @@ describe("hubspot-deals action", () => {
     expect(result.guidance).toContain("risk_status");
   });
 
-  it("passes statusProperty through to HubSpot CRM search", async () => {
-    searchHubSpotDealsByRiskStatuses.mockResolvedValue({
+  it("passes dealProperty through to HubSpot CRM search", async () => {
+    searchHubSpotDealsByPropertyValues.mockResolvedValue({
       deals: [],
       total: 0,
       nextAfter: null,
@@ -109,18 +110,27 @@ describe("hubspot-deals action", () => {
     getDealOwners.mockResolvedValue({});
 
     await hubspotDeals.run({
-      riskStatuses: ["At Risk"],
-      statusProperty: "csm_sentiment",
+      propertyValues: ["At Risk"],
+      dealProperty: "csm_sentiment",
       limit: 25,
     });
 
-    expect(searchHubSpotDealsByRiskStatuses).toHaveBeenCalledWith({
-      riskStatuses: ["At Risk"],
-      statusProperty: "csm_sentiment",
+    expect(searchHubSpotDealsByPropertyValues).toHaveBeenCalledWith({
+      propertyValues: ["At Risk"],
+      propertyName: "csm_sentiment",
       limit: 25,
       after: undefined,
       extraProperties: undefined,
     });
+  });
+
+  it("requires dealProperty when propertyValues is provided", async () => {
+    await expect(
+      hubspotDeals.run({
+        propertyValues: ["Churn Risk"],
+        limit: 25,
+      }),
+    ).rejects.toThrow(/dealProperty is required/);
   });
 
   it("uses targeted HubSpot search for named deal/account queries", async () => {

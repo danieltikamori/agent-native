@@ -6,7 +6,7 @@ import {
   getDealOwners,
   readHubSpotObjects,
   searchHubSpotCompaniesByProperty,
-  searchHubSpotDealsByRiskStatuses,
+  searchHubSpotDealsByPropertyValues,
   type Deal,
   type HubSpotObjectRecord,
 } from "./hubspot";
@@ -19,8 +19,8 @@ import {
 
 /** Caller-supplied HubSpot + Pylon property names for secondary cohort joins. */
 export const secondaryCohortConfigSchema = z.object({
-  statusProperty: z.string().min(1),
-  activeStatusValues: z.array(z.string().min(1)).min(1),
+  dealProperty: z.string().min(1),
+  dealPropertyValues: z.array(z.string().min(1)).min(1),
   companyRootOrgIdProperty: z.string().min(1),
   companyDomainProperty: z.string().min(1),
   companySegmentProperty: z.string().min(1),
@@ -28,7 +28,7 @@ export const secondaryCohortConfigSchema = z.object({
   pylonSentimentField: z.string().min(1),
   pylonRootOrgIdField: z.string().min(1),
   pylonDomainField: z.string().min(1),
-  pylonRiskSentiments: z.array(z.string().min(1)).min(1),
+  pylonSentimentValues: z.array(z.string().min(1)).min(1),
   ownerProperty: z.string().min(1),
   arrProperty: z.string().min(1),
 });
@@ -140,13 +140,14 @@ function isSegmentMatch(
   return info?.accountProfile === config.companySegmentValue;
 }
 
-function uniqueRiskPylonEntries(
+function uniqueMatchingPylonEntries(
   pylonSentimentMap: PylonSentimentMap,
   config: SecondaryCohortConfig,
 ): PylonSentimentEntry[] {
   const byAccountId = new Map<string, PylonSentimentEntry>();
   for (const entry of pylonSentimentMap.values()) {
-    if (!isRiskSentiment(entry.sentiment, config.pylonRiskSentiments)) continue;
+    if (!isRiskSentiment(entry.sentiment, config.pylonSentimentValues))
+      continue;
     if (!byAccountId.has(entry.pylonAccountId)) {
       byAccountId.set(entry.pylonAccountId, entry);
     }
@@ -154,18 +155,18 @@ function uniqueRiskPylonEntries(
   return Array.from(byAccountId.values());
 }
 
-async function fetchAllRiskStatusDeals(
+async function fetchDealsByPropertyValues(
   config: SecondaryCohortConfig,
 ): Promise<Deal[]> {
   const deals: Deal[] = [];
   let after: string | undefined;
   for (let page = 0; page < 10; page++) {
-    const result = await searchHubSpotDealsByRiskStatuses({
-      riskStatuses: config.activeStatusValues,
-      statusProperty: config.statusProperty,
+    const result = await searchHubSpotDealsByPropertyValues({
+      propertyValues: config.dealPropertyValues,
+      propertyName: config.dealProperty,
       limit: 100,
       after,
-      extraProperties: [config.statusProperty],
+      extraProperties: [config.dealProperty],
     });
     deals.push(...result.deals);
     after = result.nextAfter ?? undefined;
@@ -249,10 +250,10 @@ function secondaryCohortCacheKey(config: SecondaryCohortConfig): string {
     [
       "secondary-cohort:v3",
       config.pylonSentimentField,
-      config.pylonRiskSentiments.join(","),
+      config.pylonSentimentValues.join(","),
       config.companySegmentValue,
-      config.statusProperty,
-      config.activeStatusValues.join(","),
+      config.dealProperty,
+      config.dealPropertyValues.join(","),
     ].join(":"),
     "HUBSPOT_ACCESS_TOKEN",
   );
@@ -267,11 +268,11 @@ async function computeSecondaryCohort(
       rootOrgIdField: config.pylonRootOrgIdField,
       domainField: config.pylonDomainField,
     }),
-    fetchAllRiskStatusDeals(config),
+    fetchDealsByPropertyValues(config),
     getDealOwners(),
   ]);
 
-  const riskEntries = uniqueRiskPylonEntries(pylonSentimentMap, config);
+  const riskEntries = uniqueMatchingPylonEntries(pylonSentimentMap, config);
   if (!riskEntries.length) return [];
 
   const flaggedCompanyMap = await buildDealCompanyMap(
@@ -339,7 +340,7 @@ async function computeSecondaryCohort(
     const entry = lookupPylon(company, pylonSentimentMap);
     if (
       !entry ||
-      !isRiskSentiment(entry.sentiment, config.pylonRiskSentiments) ||
+      !isRiskSentiment(entry.sentiment, config.pylonSentimentValues) ||
       flaggedPylonAccountIds.has(entry.pylonAccountId)
     ) {
       continue;
@@ -389,7 +390,7 @@ async function computeSecondaryCohort(
   return results.map(({ earliestCloseMs: _earliestCloseMs, ...rest }) => rest);
 }
 
-/** Join Pylon risk sentiment to HubSpot deals; exclude accounts already flagged in CRM. */
+/** Join a secondary provider cohort to HubSpot deals; exclude primary-property matches. */
 export async function buildSecondaryCohort(
   config: SecondaryCohortConfig,
 ): Promise<SecondaryCohortAccount[]> {

@@ -6,7 +6,7 @@ import {
   getDealPipelines,
   getDealOwners,
   getVisiblePipelines,
-  searchHubSpotDealsByRiskStatuses,
+  searchHubSpotDealsByPropertyValues,
   searchHubSpotObjects,
   type Deal,
   type Pipeline,
@@ -356,14 +356,15 @@ export default defineAction({
       .describe(
         "Optional HubSpot full-text deal search query, such as a company name, deal name, domain, or keyword. Use for customer/deal deep dives. Do not use query as a substitute for field-specific product, pipeline, stage, or date filters.",
       ),
-    riskStatuses: StringListSchema.describe(
-      "Optional exact status values to match on a HubSpot deal property (e.g. Churn Risk, On the Radar). Uses HubSpot CRM property IN search instead of the full deal catalog. Pair with statusProperty when the CRM field is not risk_status.",
+    propertyValues: StringListSchema.describe(
+      "Optional exact values to match on a HubSpot deal property via CRM IN search (e.g. stage labels, status picklist values). Bypasses the full deal catalog. Requires dealProperty.",
     ),
-    statusProperty: z
+    dealProperty: z
       .string()
+      .min(1)
       .optional()
       .describe(
-        "HubSpot deal property name for riskStatuses CRM search. Defaults to risk_status. Pass explicitly when wiring multi-source dashboards.",
+        "HubSpot deal property name for propertyValues CRM search. Required when propertyValues is set.",
       ),
     limit: z.coerce
       .number()
@@ -398,18 +399,23 @@ export default defineAction({
     closedDateFrom,
     closedDateTo,
     query,
-    riskStatuses,
-    statusProperty,
+    propertyValues,
+    dealProperty,
     limit = 25,
     offset = 0,
     after,
   }) => {
-    if (riskStatuses && riskStatuses.length > 0) {
-      const trimmedStatusProperty = statusProperty?.trim() || "risk_status";
+    if (propertyValues && propertyValues.length > 0) {
+      const trimmedDealProperty = dealProperty?.trim();
+      if (!trimmedDealProperty) {
+        throw new Error(
+          "dealProperty is required when propertyValues is provided",
+        );
+      }
       const [searchResult, allPipelines, owners] = await Promise.all([
-        searchHubSpotDealsByRiskStatuses({
-          riskStatuses,
-          statusProperty: trimmedStatusProperty,
+        searchHubSpotDealsByPropertyValues({
+          propertyValues,
+          propertyName: trimmedDealProperty,
           limit,
           after,
           extraProperties: properties,
@@ -430,7 +436,7 @@ export default defineAction({
         total: searchResult.total,
         count: deals.length,
         nextAfter: searchResult.nextAfter,
-        guidance: `Loaded via HubSpot CRM search on ${trimmedStatusProperty} instead of scanning the full deal catalog. Page with the returned nextAfter cursor for more results.`,
+        guidance: `Loaded via HubSpot CRM search on ${trimmedDealProperty} instead of scanning the full deal catalog. Page with the returned nextAfter cursor for more results.`,
       };
     }
 

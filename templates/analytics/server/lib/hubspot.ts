@@ -470,13 +470,10 @@ function objectRecordToDeal(record: HubSpotObjectRecord): Deal {
   };
 }
 
-// CRM search on a risk-status property (default `risk_status`) — used by
-// the risk meeting review so the HubSpot-flagged cohort doesn't require
-// scanning the entire deal catalog. `statusProperty` is configurable so an
-// org with a differently-named CRM field doesn't need a code change.
-export async function searchHubSpotDealsByRiskStatuses(options: {
-  riskStatuses: string[];
-  statusProperty?: string;
+// CRM search on a deal property with IN — bypasses scanning the full deal catalog.
+export async function searchHubSpotDealsByPropertyValues(options: {
+  propertyValues: string[];
+  propertyName: string;
   limit?: number;
   after?: string;
   extraProperties?: string[];
@@ -485,12 +482,17 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
   total: number;
   nextAfter: string | null;
 }> {
-  const riskStatuses = uniqueProperties(options.riskStatuses);
-  if (!riskStatuses.length) {
+  const propertyValues = uniqueProperties(options.propertyValues);
+  if (!propertyValues.length) {
     return { deals: [], total: 0, nextAfter: null };
   }
 
-  const statusProperty = options.statusProperty?.trim() || "risk_status";
+  const propertyName = options.propertyName.trim();
+  if (!propertyName) {
+    throw new Error(
+      "propertyName is required for HubSpot deal property search",
+    );
+  }
   const limit = Math.max(1, Math.min(100, options.limit ?? 100));
   const properties = await resolveDealProperties(options.extraProperties ?? []);
 
@@ -499,9 +501,9 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
       {
         filters: [
           {
-            propertyName: statusProperty,
+            propertyName,
             operator: "IN",
-            values: riskStatuses,
+            values: propertyValues,
           },
         ],
       },
@@ -514,7 +516,7 @@ export async function searchHubSpotDealsByRiskStatuses(options: {
   const data = await apiPost<HubSpotObjectListResponse>(
     "/crm/v3/objects/deals/search",
     body,
-    `risk-status-search:${statusProperty}:${riskStatuses.join(",")}:${limit}:${options.after ?? ""}`,
+    `deal-property-search:${propertyName}:${propertyValues.join(",")}:${limit}:${options.after ?? ""}`,
   );
 
   return {
