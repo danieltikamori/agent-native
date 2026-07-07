@@ -468,6 +468,16 @@ describe("design connect bridge endpoints", () => {
       expect(html.body).toContain('src="/src/main.ts"');
       expect(html.body).toContain("agent-native:editor-chrome-ready");
 
+      const interactHtml = await getText(
+        `${base}/live-edit?path=/dashboard&bridge=0`,
+      );
+      expect(interactHtml.status).toBe(200);
+      expect(interactHtml.body).toContain(`<base href="${base}/">`);
+      expect(interactHtml.body).toContain('src="/src/main.ts"');
+      expect(interactHtml.body).not.toContain(
+        "agent-native:editor-chrome-ready",
+      );
+
       const module = await getText(`${base}/src/main.ts`);
       expect(module.status).toBe(200);
       expect(module.headers["content-type"]).toContain(

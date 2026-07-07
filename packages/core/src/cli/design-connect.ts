@@ -1286,10 +1286,12 @@ export async function startDesignConnectBridge(
               manifest.devServerUrl,
               targetUrl,
             );
+            const includeEditorBridge =
+              requestUrl.searchParams.get("bridge") !== "0";
             const html = injectLiveEditBridge(
               snapshot.html,
               new URL("/", manifest.bridgeUrl).toString(),
-              liveEditBridgeScript,
+              includeEditorBridge ? liveEditBridgeScript : "",
             );
             sendText(
               res,
