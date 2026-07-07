@@ -22109,6 +22109,14 @@ export default function DesignEditor() {
     ) {
       return;
     }
+    const preservePreviewPatches = pendingVisualStyleEdits
+      .map((edit) => ({
+        screenId: edit.screenId,
+        selector: edit.selector,
+        sourceId: edit.sourceId,
+        styles: edit.styles,
+      }))
+      .filter((patch) => Object.keys(patch.styles).length > 0);
     sendToDesignAgentChat({
       message: t("designEditor.pendingVisualStyles.agentMessage"),
       context: pendingVisualStylePrompt,
@@ -22132,13 +22140,22 @@ export default function DesignEditor() {
       });
     }
     clearPendingLiveEditState();
-    setPendingVisualStyleBaselineResetRequest(Date.now() + Math.random());
+    const previewRequestId = Date.now() + Math.random();
+    window.setTimeout(() => {
+      if (preservePreviewPatches.length > 0) {
+        setPendingVisualStyleRevertRequest({
+          requestId: previewRequestId,
+          patches: preservePreviewPatches,
+        });
+      }
+      setPendingVisualStyleBaselineResetRequest(previewRequestId);
+    }, 50);
     setActiveLeftPanel("agent");
     toast.success(t("designEditor.pendingVisualStyles.sentToast"));
   }, [
     clearPendingLiveEditState,
     pendingLiveNonStyleEdits,
-    pendingVisualStyleEdits.length,
+    pendingVisualStyleEdits,
     pendingVisualStylePrompt,
     t,
   ]);
