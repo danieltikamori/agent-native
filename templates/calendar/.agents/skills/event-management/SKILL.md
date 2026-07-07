@@ -107,11 +107,18 @@ pnpm action create-event \
 # Working location
 pnpm action create-event \
   --title "Working from home" \
-  --start 2026-04-03T09:00:00 \
-  --end 2026-04-03T17:00:00 \
+  --start 2026-04-03 \
+  --end 2026-04-04 \
+  --allDay true \
   --eventType workingLocation \
   --workingLocationType homeOffice
 ```
+
+Working-location events sync from Google with `workingLocationProperties` and
+render as native working locations in the UI instead of generic all-day events.
+They are transparent/non-blocking for availability. Google allows timed working
+locations or single-day all-day working locations; multi-day all-day ranges must
+be represented as separate daily working-location events.
 
 Do not use `eventType` for Tasks or appointment schedules. Google Calendar
 Tasks are a separate product/API surface, and appointment schedules should use
@@ -181,6 +188,12 @@ pnpm action update-event --id google-event-id --attendees "alice@example.com" --
 pnpm action update-event --id google-event-id --addGoogleMeet=true
 pnpm action update-event --id google-event-id --addZoom=true
 
+# Update an existing working-location event's native metadata
+pnpm action update-event \
+  --id google-working-location-id \
+  --workingLocationType officeLocation \
+  --workingLocationLabel "Pier 57"
+
 # Add multiple alerts, a Google event color, and an attachment
 pnpm action update-event \
   --id google-event-id \
@@ -192,6 +205,15 @@ pnpm action update-event \
 `--attendees` REPLACES the entire attendee list — to add someone, fetch the existing attendees first via `get-event` and pass the merged list. Pass an empty string to clear all attendees.
 
 For "add Zoom to this meeting", fetch or use the visible event id and call `update-event --addZoom=true`. Do not create an extension for Zoom; Zoom is a first-party calendar integration handled by the event actions and the Settings page.
+
+Google Calendar does not allow changing an existing event's `eventType`; use
+`workingLocationType` and `workingLocationLabel` only on events that already
+have `eventType: "workingLocation"`.
+
+Google Calendar API v3 currently documents working locations on Events, but the
+Settings API/discovery document does not expose working-hours settings. Treat
+working-hours overlays or Find a Time constraints as a follow-up only after a
+real provider data path exists.
 
 For recurring events, pass a Google Calendar RRULE in `--recurrence`. Example: to make a daily event weekdays only, use:
 
